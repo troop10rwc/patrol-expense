@@ -1,13 +1,19 @@
 import { Hono } from "hono";
 import type { Trip } from "../shared/types.ts";
 import { slugify } from "../shared/slug.ts";
-import { loadTripBundle, regenerateTravelExpenses } from "./db.ts";
+import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip } from "./db.ts";
+import { fetchRoster } from "./roster.ts";
+import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
 
 interface Bindings {
   DB: D1Database;
+  ROSTER: D1Database;
   ASSETS: Fetcher;
+  GOOGLE_MAPS_API_KEY?: string;
 }
+
+type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 
 const app = new Hono<{ Bindings: Bindings }>();
 const api = new Hono<{ Bindings: Bindings }>();
@@ -22,8 +28,19 @@ async function bundleResponse(db: D1Database, tripId: number) {
 
 // ---- trips ----
 api.get("/trips", async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT * FROM trips ORDER BY id DESC").all<Trip>();
-  return c.json(results);
+  const { results } = await c.env.DB.prepare("SELECT * FROM trips ORDER BY id DESC").all<TripRow>();
+  return c.json(results.map(normalizeTrip));
+});
+
+// Live roster (adults + youth) for the trip's configured units, read from
+// the external roster-db. Feeds the picker and the Settings roster view.
+api.get("/trips/:id/roster", async (c) => {
+  const id = Number(c.req.param("id"));
+  const row = await c.env.DB.prepare("SELECT * FROM trips WHERE id = ?").bind(id).first<TripRow>();
+  if (!row) return c.json(bad("trip not found"), 404);
+  const trip = normalizeTrip(row);
+  const members = await fetchRoster(c.env.ROSTER, trip.roster_units);
+  return c.json(members);
 });
 
 api.post("/trips", async (c) => {
@@ -57,8 +74,9 @@ api.get("/trips/:id", async (c) => {
 api.patch("/trips/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const b = await c.req.json<Partial<Trip>>();
-  const current = await c.env.DB.prepare("SELECT * FROM trips WHERE id = ?").bind(id).first<Trip>();
-  if (!current) return c.json(bad("trip not found"), 404);
+  const row = await c.env.DB.prepare("SELECT * FROM trips WHERE id = ?").bind(id).first<TripRow>();
+  if (!row) return c.json(bad("trip not found"), 404);
+  const current = normalizeTrip(row);
   const merged: Trip = {
     ...current,
     ...(b.name !== undefined ? { name: b.name } : {}),
@@ -67,12 +85,16 @@ api.patch("/trips/:id", async (c) => {
     ...(b.planning_doc_url !== undefined ? { planning_doc_url: b.planning_doc_url } : {}),
     ...(b.slack_url !== undefined ? { slack_url: b.slack_url } : {}),
     ...(b.mileage_rate !== undefined ? { mileage_rate: b.mileage_rate } : {}),
+    ...(Array.isArray(b.roster_units) ? { roster_units: b.roster_units } : {}),
   };
   if (!merged.slug?.trim()) return c.json(bad("slug cannot be empty"), 400);
   await c.env.DB.prepare(
-    "UPDATE trips SET name=?, slug=?, trip_date=?, planning_doc_url=?, slack_url=?, mileage_rate=? WHERE id=?",
+    "UPDATE trips SET name=?, slug=?, trip_date=?, planning_doc_url=?, slack_url=?, mileage_rate=?, roster_units=? WHERE id=?",
   )
-    .bind(merged.name, merged.slug, merged.trip_date, merged.planning_doc_url, merged.slack_url, merged.mileage_rate, id)
+    .bind(
+      merged.name, merged.slug, merged.trip_date, merged.planning_doc_url,
+      merged.slack_url, merged.mileage_rate, JSON.stringify(merged.roster_units), id,
+    )
     .run();
   if (merged.mileage_rate !== current.mileage_rate) {
     const travel = await c.env.DB.prepare(
@@ -90,15 +112,21 @@ api.delete("/trips/:id", async (c) => {
   return c.json({ ok: true });
 });
 
-// ---- people ----
+// ---- people (local, unregistered additions only) ----
+// Registered members come from roster-db and are projected automatically; this
+// endpoint creates app-local people (e.g. a guest cub scout). A scout's parent
+// may be given as parent_id (local) or parent_ref ("id:"/"bsa:", projected).
 api.post("/trips/:id/people", async (c) => {
   const tripId = Number(c.req.param("id"));
-  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number }>();
+  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number; parent_ref?: string }>();
   if (!b.name || !b.type) return c.json(bad("name and type are required"), 400);
+  const parentId = b.parent_ref
+    ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.parent_ref)
+    : b.parent_id ?? null;
   await c.env.DB.prepare(
-    "INSERT INTO people (trip_id, name, code, email, type, parent_id) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO people (trip_id, name, code, email, type, parent_id, source) VALUES (?, ?, ?, ?, ?, ?, 'local')",
   )
-    .bind(tripId, b.name, b.code ?? null, b.email ?? null, b.type, b.parent_id ?? null)
+    .bind(tripId, b.name, b.code ?? null, b.email ?? null, b.type, parentId)
     .run();
   return c.json(await bundleResponse(c.env.DB, tripId), 201);
 });
@@ -173,14 +201,28 @@ api.delete("/groups/:gid", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
+// Resolve a body's person references to local ids. Accepts `refs` ("id:N" /
+// "bsa:NNN") and/or legacy `person_ids`, projecting roster members as needed.
+async function resolvePeople(
+  c: { env: Bindings },
+  tripId: number,
+  body: { refs?: string[]; person_ids?: number[] },
+): Promise<number[]> {
+  const ids: number[] = [...(body.person_ids ?? [])];
+  for (const ref of body.refs ?? []) {
+    ids.push(await resolveRef(c.env.DB, c.env.ROSTER, tripId, ref));
+  }
+  return [...new Set(ids)];
+}
+
 // Replace a travel group's driver set.
 api.put("/groups/:gid/drivers", async (c) => {
   const gid = Number(c.req.param("gid"));
-  const b = await c.req.json<{ person_ids: number[] }>();
+  const b = await c.req.json<{ refs?: string[]; person_ids?: number[] }>();
   const row = await c.env.DB.prepare("SELECT trip_id FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("group not found"), 404);
+  const ids = await resolvePeople(c, row.trip_id, b);
   await c.env.DB.prepare("DELETE FROM travel_drivers WHERE group_id = ?").bind(gid).run();
-  const ids = b.person_ids ?? [];
   if (ids.length) {
     await c.env.DB.batch(
       ids.map((pid) =>
@@ -196,11 +238,11 @@ api.put("/groups/:gid/drivers", async (c) => {
 // derived from this.
 api.put("/groups/:gid/members", async (c) => {
   const gid = Number(c.req.param("gid"));
-  const b = await c.req.json<{ person_ids: number[] }>();
+  const b = await c.req.json<{ refs?: string[]; person_ids?: number[] }>();
   const row = await c.env.DB.prepare("SELECT trip_id FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("group not found"), 404);
+  const ids = await resolvePeople(c, row.trip_id, b);
   await c.env.DB.prepare("DELETE FROM group_members WHERE group_id = ?").bind(gid).run();
-  const ids = [...new Set(b.person_ids ?? [])];
   if (ids.length) {
     await c.env.DB.batch(
       ids.map((pid) =>
@@ -216,13 +258,16 @@ api.put("/groups/:gid/members", async (c) => {
 // ---- expenses ----
 api.post("/trips/:id/expenses", async (c) => {
   const tripId = Number(c.req.param("id"));
-  const b = await c.req.json<{ group_id: number; description: string; amount: number; payer_id: number }>();
-  if (!b.group_id || !b.payer_id || b.amount == null || !b.description)
-    return c.json(bad("group_id, payer_id, amount, description are required"), 400);
+  const b = await c.req.json<{ group_id: number; description: string; amount: number; payer_id?: number; payer_ref?: string }>();
+  if (!b.group_id || b.amount == null || !b.description || (!b.payer_id && !b.payer_ref))
+    return c.json(bad("group_id, payer (id or ref), amount, description are required"), 400);
+  const payerId = b.payer_ref
+    ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.payer_ref)
+    : b.payer_id!;
   await c.env.DB.prepare(
     "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
   )
-    .bind(tripId, b.group_id, b.description, b.amount, b.payer_id)
+    .bind(tripId, b.group_id, b.description, b.amount, payerId)
     .run();
   return c.json(await bundleResponse(c.env.DB, tripId), 201);
 });
@@ -284,9 +329,35 @@ api.put("/trips/:id/settlements/:pid", async (c) => {
   return c.json(await bundleResponse(c.env.DB, tripId));
 });
 
+// ---- geo (Google Maps proxy; key stays server-side) ----
+api.get("/geo/autocomplete", async (c) => {
+  const key = c.env.GOOGLE_MAPS_API_KEY;
+  if (!key) return c.json(bad("maps not configured"), 503);
+  const q = c.req.query("q") ?? "";
+  try {
+    return c.json(await autocomplete(key, q));
+  } catch (e) {
+    return c.json(bad(String(e)), 502);
+  }
+});
+
+api.get("/geo/distance", async (c) => {
+  const key = c.env.GOOGLE_MAPS_API_KEY;
+  if (!key) return c.json(bad("maps not configured"), 503);
+  const from = c.req.query("from") ?? "";
+  const to = c.req.query("to") ?? "";
+  if (!to) return c.json(bad("'to' is required"), 400);
+  try {
+    const oneWay = await drivingMiles(key, from, to);
+    return c.json({ one_way_miles: oneWay, round_trip_miles: Math.round(oneWay * 2 * 10) / 10 });
+  } catch (e) {
+    return c.json(bad(String(e)), 502);
+  }
+});
+
 // ---- seed (dev/demo convenience) ----
 api.post("/seed", async (c) => {
-  const { tripId } = await seedWinterLodge(c.env.DB);
+  const { tripId } = await seedWinterLodge(c.env.DB, c.env.ROSTER);
   return c.json(await bundleResponse(c.env.DB, tripId), 201);
 });
 

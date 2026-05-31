@@ -1,0 +1,9 @@
+# Local dev secrets for `wrangler dev` / vite. Copy to `.dev.vars` (gitignored)
+# and fill in. For production: `wrangler secret put GOOGLE_MAPS_API_KEY`.
+#
+# The key is used server-side by the Worker (src/worker/geo.ts) for:
+#   - Places API (New)   — address autocomplete
+#   - Routes API         — most-direct driving distance
+# Enable BOTH APIs on the key, and set Application restriction to "None"
+# (the Worker calls server-to-server, so HTTP-referrer restriction would block it).
+GOOGLE_MAPS_API_KEY=your-google-maps-api-key

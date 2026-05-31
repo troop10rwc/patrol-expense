@@ -16,6 +16,15 @@
       // Placeholder for local dev. Replace with the real id from `wrangler d1 create patrol_expense` before deploying.
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
+    },
+    {
+      // Existing, externally-managed BSA roster DB. Read-only from this app.
+      // remote:true => `wrangler dev`/vite proxy reads the real roster-db
+      // (requires `wrangler login`); the trip DB above stays local.
+      "binding": "ROSTER",
+      "database_name": "roster-db",
+      "database_id": "9657e9c5-3426-4af4-8aaa-706309ad6633",
+      "remote": true
     }
   ]
 }

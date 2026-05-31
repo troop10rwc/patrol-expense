@@ -9,10 +9,26 @@ import type {
   TripBundle,
 } from "../shared/types.ts";
 import { computeGroupSummaries, computePaysheet, travelReimbursement, type EngineInput } from "./engine.ts";
+import { fetchRosterMember } from "./roster.ts";
+
+/** Raw trip row: roster_units arrives as a JSON string from D1. */
+type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
+
+export function normalizeTrip(row: TripRow): Trip {
+  let units: string[] = [];
+  try {
+    const v = JSON.parse(row.roster_units ?? "[]");
+    if (Array.isArray(v)) units = v.filter((x): x is string => typeof x === "string");
+  } catch {
+    units = [];
+  }
+  return { ...row, roster_units: units };
+}
 
 export async function loadEngineInput(db: D1Database, tripId: number): Promise<EngineInput | null> {
-  const trip = await db.prepare("SELECT * FROM trips WHERE id = ?").bind(tripId).first<Trip>();
-  if (!trip) return null;
+  const row = await db.prepare("SELECT * FROM trips WHERE id = ?").bind(tripId).first<TripRow>();
+  if (!row) return null;
+  const trip = normalizeTrip(row);
 
   const [people, groups, expenses, prepayments, members, travelDrivers, settlements] =
     await db.batch([
@@ -93,4 +109,70 @@ export async function regenerateTravelExpenses(db: D1Database, groupId: number):
       .bind(trip.id, target, `Travel reimbursement: ${group.name}`, amount, d.person_id, groupId),
   );
   if (stmts.length) await db.batch(stmts);
+}
+
+const last4 = (bsa: string) => bsa.slice(-4);
+
+/**
+ * Ensure a local projection row exists for a roster-db member, returning its
+ * local people.id. Idempotent per (trip, bsa_number). For youth, the billable
+ * guardian (relationships[0]) is projected first and linked as parent_id.
+ * Throws if the bsa_number is not present in roster-db.
+ */
+export async function ensureLocalPerson(
+  db: D1Database,
+  roster: D1Database,
+  tripId: number,
+  bsa: string,
+): Promise<number> {
+  const existing = await db
+    .prepare("SELECT id FROM people WHERE trip_id = ? AND bsa_number = ?")
+    .bind(tripId, bsa)
+    .first<{ id: number }>();
+  if (existing) return existing.id;
+
+  const member = await fetchRosterMember(roster, bsa);
+  if (!member) throw new Error(`roster member ${bsa} not found`);
+
+  let parentId: number | null = null;
+  if (member.type === "scout" && member.guardian) {
+    parentId = await ensureLocalPerson(db, roster, tripId, member.guardian.bsa_number);
+  }
+
+  await db
+    .prepare(
+      "INSERT INTO people (trip_id, name, code, email, type, parent_id, bsa_number, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'roster') ON CONFLICT(trip_id, bsa_number) WHERE bsa_number IS NOT NULL DO NOTHING",
+    )
+    .bind(tripId, member.name, last4(bsa), member.email, member.type, parentId, bsa)
+    .run();
+
+  const row = await db
+    .prepare("SELECT id FROM people WHERE trip_id = ? AND bsa_number = ?")
+    .bind(tripId, bsa)
+    .first<{ id: number }>();
+  if (!row) throw new Error(`failed to project roster member ${bsa}`);
+  return row.id;
+}
+
+/**
+ * Resolve a person reference to a local people.id.
+ *   "id:123"        -> existing local person 123
+ *   "bsa:14140573"  -> roster member, projected in if needed
+ */
+export async function resolveRef(
+  db: D1Database,
+  roster: D1Database,
+  tripId: number,
+  ref: string,
+): Promise<number> {
+  if (ref.startsWith("bsa:")) {
+    return ensureLocalPerson(db, roster, tripId, ref.slice(4));
+  }
+  if (ref.startsWith("id:")) {
+    return Number(ref.slice(3));
+  }
+  // Bare number => treat as local id (back-compat).
+  const n = Number(ref);
+  if (Number.isFinite(n)) return n;
+  throw new Error(`unrecognized person ref: ${ref}`);
 }

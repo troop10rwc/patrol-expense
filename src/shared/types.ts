@@ -1,6 +1,7 @@
 export type PersonType = "adult" | "scout";
 export type GroupKind = "unit" | "patrol" | "travel";
 export type SettlementStatus = "none" | "requested" | "received" | "paid";
+export type PersonSource = "roster" | "local";
 
 export interface Trip {
   id: number;
@@ -11,6 +12,7 @@ export interface Trip {
   planning_doc_url: string | null;
   slack_url: string | null;
   mileage_rate: number;
+  roster_units: string[];
   created_at: string;
 }
 
@@ -22,7 +24,24 @@ export interface Person {
   email: string | null;
   type: PersonType;
   parent_id: number | null;
+  bsa_number: string | null;
+  source: PersonSource;
   created_at: string;
+}
+
+/** A live member read from the external roster-db (not stored in the trip DB). */
+export interface RosterMember {
+  bsa_number: string;
+  name: string;
+  first_name: string;
+  last_name: string;
+  type: PersonType;
+  email: string | null;
+  units: string[];
+  // youth only:
+  patrol?: string | null;
+  rank?: string | null;
+  guardian?: { bsa_number: string; name: string } | null;
 }
 
 export interface CostGroup {

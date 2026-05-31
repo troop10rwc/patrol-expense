@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState, type ClipboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type {
   TripBundle,
   Person,
   CostGroup,
   GroupSummary,
   SettlementStatus,
+  RosterMember,
+  PersonType,
 } from "../shared/types.ts";
-import { api, money } from "./api.ts";
+import { api, money, HOME_ADDRESS } from "./api.ts";
 
 type Tab = "patrols" | "travel" | "expenses" | "reimbursement" | "settings";
 const TAB_ORDER: Tab[] = ["patrols", "travel", "expenses", "reimbursement", "settings"];
@@ -21,6 +23,7 @@ const UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
 
 export function App() {
   const [bundle, setBundle] = useState<TripBundle | null>(null);
+  const [roster, setRoster] = useState<RosterMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +61,18 @@ export function App() {
   useEffect(() => {
     if (bundle) setTitleDraft(bundle.trip.name);
   }, [bundle?.trip.id, bundle?.trip.name]);
+
+  // The registered roster comes from roster-db; refetch when the trip or its
+  // configured units change.
+  useEffect(() => {
+    if (!bundle) return;
+    let cancelled = false;
+    api
+      .getRoster(bundle.trip.id)
+      .then((r) => { if (!cancelled) setRoster(r); })
+      .catch((e) => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, [bundle?.trip.id, bundle?.trip.roster_units.join(",")]);
 
   async function run(fn: () => Promise<TripBundle>) {
     setBusy(true);
@@ -148,19 +163,76 @@ export function App() {
 
       {error && <div className="err">{error}</div>}
 
-      {tab === "patrols" && <Patrols bundle={bundle} run={run} busy={busy} />}
-      {tab === "travel" && <Travel bundle={bundle} run={run} busy={busy} />}
-      {tab === "expenses" && <Expenses bundle={bundle} run={run} busy={busy} />}
-      {tab === "reimbursement" && <Reimbursement bundle={bundle} run={run} busy={busy} />}
-      {tab === "settings" && <Settings bundle={bundle} run={run} busy={busy} />}
+      {tab === "patrols" && <Patrols bundle={bundle} roster={roster} run={run} busy={busy} />}
+      {tab === "travel" && <Travel bundle={bundle} roster={roster} run={run} busy={busy} />}
+      {tab === "expenses" && <Expenses bundle={bundle} roster={roster} run={run} busy={busy} />}
+      {tab === "reimbursement" && <Reimbursement bundle={bundle} roster={roster} run={run} busy={busy} />}
+      {tab === "settings" && <Settings bundle={bundle} roster={roster} run={run} busy={busy} />}
     </div>
   );
 }
 
 interface TabProps {
   bundle: TripBundle;
+  roster: RosterMember[];
   busy: boolean;
   run: (fn: () => Promise<TripBundle>) => Promise<void>;
+}
+
+// A selectable person for the pickers, identified by a ref the API understands.
+interface PickItem {
+  ref: string; // "id:<localId>" | "bsa:<bsaNumber>"
+  name: string;
+  type: PersonType;
+  sub?: string; // secondary line (patrol, guardian, "guest", email…)
+  email?: string | null;
+}
+
+/**
+ * Build the picker pool from local people + the live roster, de-duplicating
+ * roster members already projected locally (matched by bsa_number). `kind`
+ * limits the pool to adults (drivers) or everyone (attendance).
+ */
+function buildPool(
+  bundle: TripBundle,
+  roster: RosterMember[],
+  kind: "all" | "adults",
+): PickItem[] {
+  const personById = new Map(bundle.people.map((p) => [p.id, p]));
+  const localBsa = new Set(bundle.people.map((p) => p.bsa_number).filter(Boolean) as string[]);
+
+  const localItems: PickItem[] = bundle.people
+    .filter((p) => kind === "all" || p.type === "adult")
+    .map((p) => ({
+      ref: `id:${p.id}`,
+      name: p.name,
+      type: p.type,
+      email: p.email,
+      sub:
+        p.source === "local"
+          ? p.type === "scout"
+            ? `guest · ${p.parent_id ? personById.get(p.parent_id)?.name ?? "" : "no parent"}`
+            : "guest"
+          : p.type === "scout"
+            ? p.parent_id ? personById.get(p.parent_id)?.name ?? "" : ""
+            : "adult",
+    }));
+
+  const rosterItems: PickItem[] = roster
+    .filter((m) => kind === "all" || m.type === "adult")
+    .filter((m) => !localBsa.has(m.bsa_number))
+    .map((m) => ({
+      ref: `bsa:${m.bsa_number}`,
+      name: m.name,
+      type: m.type,
+      email: m.email,
+      sub:
+        m.type === "scout"
+          ? [m.patrol, m.guardian?.name].filter(Boolean).join(" · ") || "youth"
+          : "adult",
+    }));
+
+  return [...localItems, ...rosterItems].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function useMaps(bundle: TripBundle) {
@@ -262,18 +334,22 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
 }
 
 // ------------------------------------------------------------------ Expenses
-function Expenses({ bundle, run, busy }: TabProps) {
-  const { personById, adults } = useMaps(bundle);
+function Expenses({ bundle, roster, run, busy }: TabProps) {
+  const { personById } = useMaps(bundle);
   const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
+  // Payer pool: adults from local people + roster (deduped), as refs.
+  const adultPool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
   const [groupId, setGroupId] = useState<number>(costGroups[0]?.id ?? 0);
-  const [payerId, setPayerId] = useState<number>(adults[0]?.id ?? 0);
+  const [payerRef, setPayerRef] = useState<string>("");
   const [desc, setDesc] = useState("");
   const [amount, setAmount] = useState("");
 
+  const effectivePayer = payerRef || adultPool[0]?.ref || "";
+
   function add() {
     const amt = parseFloat(amount);
-    if (!desc || !groupId || !payerId || isNaN(amt)) return;
-    run(() => api.addExpense(bundle.trip.id, { group_id: groupId, payer_id: payerId, description: desc, amount: amt }))
+    if (!desc || !groupId || !effectivePayer || isNaN(amt)) return;
+    run(() => api.addExpense(bundle.trip.id, { group_id: groupId, payer_ref: effectivePayer, description: desc, amount: amt }))
       .then(() => { setDesc(""); setAmount(""); });
   }
 
@@ -287,8 +363,8 @@ function Expenses({ bundle, run, busy }: TabProps) {
           </select>
         </label>
         <label className="fld">Paid by
-          <select value={payerId} onChange={(e) => setPayerId(Number(e.target.value))}>
-            {adults.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          <select value={effectivePayer} onChange={(e) => setPayerRef(e.target.value)}>
+            {adultPool.map((p) => <option key={p.ref} value={p.ref}>{p.name}</option>)}
           </select>
         </label>
         <label className="fld" style={{ flex: 1, minWidth: 160 }}>Description
@@ -334,7 +410,7 @@ function Expenses({ bundle, run, busy }: TabProps) {
 }
 
 // ------------------------------------------------------------------ Travel
-function Travel({ bundle, run, busy }: TabProps) {
+function Travel({ bundle, roster, run, busy }: TabProps) {
   const travelGroups = bundle.groups.filter((g) => g.kind === "travel");
   const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
   const [newName, setNewName] = useState("");
@@ -347,6 +423,7 @@ function Travel({ bundle, run, busy }: TabProps) {
         kind: "travel",
         sort_order: 10 + travelGroups.length,
         cost_group_id: costGroups[0]?.id ?? null,
+        origin: HOME_ADDRESS,
         tolls: 0,
       }),
     ).then(() => setNewName(""));
@@ -360,7 +437,7 @@ function Travel({ bundle, run, busy }: TabProps) {
         as expenses to the chosen cost group and flows into the paysheet automatically.
       </small></p>
       {travelGroups.map((g) => (
-        <TravelGroup key={g.id} group={g} bundle={bundle} run={run} busy={busy} />
+        <TravelGroup key={g.id} group={g} bundle={bundle} roster={roster} run={run} busy={busy} />
       ))}
       {travelGroups.length === 0 && <p className="empty">No travel routes yet.</p>}
 
@@ -380,23 +457,106 @@ function Travel({ bundle, run, busy }: TabProps) {
   );
 }
 
-function TravelGroup({ group, bundle, run, busy }: { group: CostGroup } & TabProps) {
-  const { adults } = useMaps(bundle);
+// Address text input with Google Places autocomplete (proxied via the Worker).
+function AddressInput({
+  value, onChange, onPick, busy, placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onPick?: (v: string) => void;
+  busy?: boolean;
+  placeholder?: string;
+}) {
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  // Skip the first render so a prefilled value (e.g. the default "From"
+  // address) doesn't fire a Google request / open the dropdown on mount.
+  const skipRef = useRef(true);
+
+  useEffect(() => {
+    if (skipRef.current) { skipRef.current = false; return; }
+    const q = value.trim();
+    if (q.length < 3) { setSuggestions([]); setOpen(false); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.geoAutocomplete(q);
+        if (!cancelled) { setSuggestions(r.map((x) => x.description)); setOpen(true); }
+      } catch { if (!cancelled) setSuggestions([]); }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [value]);
+
+  function pick(v: string) {
+    skipRef.current = true; // don't re-query for the value we just set
+    setOpen(false);
+    setSuggestions([]);
+    onChange(v);
+    onPick?.(v);
+  }
+
+  return (
+    <div className="ac">
+      <input
+        value={value}
+        disabled={busy}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => suggestions.length && setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+      />
+      {open && suggestions.length > 0 && (
+        <div className="ac-menu">
+          {suggestions.map((s) => (
+            <button type="button" key={s} disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(s)}>
+              <span>{s}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } & TabProps) {
   const summary = bundle.groupSummaries.find((s) => s.group.id === group.id)!;
   const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
   const driverIds = summary.driverIds ?? [];
+  const pool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
 
-  const [draft, setDraft] = useState({
-    origin: group.origin ?? "",
+  const [draft, setDraft] = useState<{
+    origin: string;
+    destination: string;
+    round_trip_miles: number;
+    tolls: number;
+    rate_override: number | null;
+    cost_group_id: number | null;
+  }>({
+    origin: group.origin || HOME_ADDRESS,
     destination: group.destination ?? "",
     round_trip_miles: group.round_trip_miles ?? (group.one_way_miles ? group.one_way_miles * 2 : 0),
     tolls: group.tolls ?? 0,
     rate_override: group.rate_override,
     cost_group_id: group.cost_group_id ?? costGroups[0]?.id ?? null,
   });
+  const [calc, setCalc] = useState<{ loading: boolean; oneWay?: number; err?: string }>({ loading: false });
 
   const rate = draft.rate_override ?? bundle.trip.mileage_rate;
   const reimb = Math.round((draft.round_trip_miles * rate + Number(draft.tolls)) * 100) / 100;
+
+  // Compute most-direct driving distance between two addresses via the Worker
+  // proxy, and populate round-trip miles (= one-way × 2).
+  async function calcDistance(from: string, to: string) {
+    if (!from.trim() || !to.trim()) return;
+    setCalc({ loading: true });
+    try {
+      const r = await api.geoDistance(from, to);
+      setDraft((d) => ({ ...d, round_trip_miles: r.round_trip_miles }));
+      setCalc({ loading: false, oneWay: r.one_way_miles });
+    } catch (e) {
+      setCalc({ loading: false, err: String(e) });
+    }
+  }
 
   function saveCalculator() {
     run(() =>
@@ -404,6 +564,7 @@ function TravelGroup({ group, bundle, run, busy }: { group: CostGroup } & TabPro
         name: group.name,
         origin: draft.origin,
         destination: draft.destination,
+        one_way_miles: calc.oneWay ?? Math.round((draft.round_trip_miles / 2) * 10) / 10,
         round_trip_miles: Number(draft.round_trip_miles),
         tolls: Number(draft.tolls),
         rate_override:
@@ -424,16 +585,37 @@ function TravelGroup({ group, bundle, run, busy }: { group: CostGroup } & TabPro
       </div>
       <div className="row">
         <label className="fld" style={{ flex: 1, minWidth: 180 }}>From
-          <input value={draft.origin} onChange={(e) => setDraft({ ...draft, origin: e.target.value })} />
+          <AddressInput
+            value={draft.origin}
+            busy={busy}
+            placeholder="Start address"
+            onChange={(v) => setDraft((d) => ({ ...d, origin: v }))}
+            onPick={(v) => calcDistance(v, draft.destination)}
+          />
         </label>
         <label className="fld" style={{ flex: 1, minWidth: 180 }}>To
-          <input value={draft.destination} onChange={(e) => setDraft({ ...draft, destination: e.target.value })} />
+          <AddressInput
+            value={draft.destination}
+            busy={busy}
+            placeholder="Destination address"
+            onChange={(v) => setDraft((d) => ({ ...d, destination: v }))}
+            onPick={(v) => calcDistance(draft.origin, v)}
+          />
         </label>
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <label className="fld">Round-trip mi
           <input className="sm" value={draft.round_trip_miles} onChange={(e) => setDraft({ ...draft, round_trip_miles: Number(e.target.value) })} inputMode="decimal" />
         </label>
+        <button
+          className="btn ghost"
+          style={{ alignSelf: "flex-end" }}
+          disabled={busy || calc.loading || !draft.origin.trim() || !draft.destination.trim()}
+          onClick={() => calcDistance(draft.origin, draft.destination)}
+          title="Most-direct driving distance via Google Maps"
+        >
+          {calc.loading ? "…" : "↻ distance"}
+        </button>
         <label className="fld">Tolls
           <input className="sm" value={draft.tolls} onChange={(e) => setDraft({ ...draft, tolls: Number(e.target.value) })} inputMode="decimal" />
         </label>
@@ -452,13 +634,20 @@ function TravelGroup({ group, bundle, run, busy }: { group: CostGroup } & TabPro
         </div>
         <button className="btn" style={{ alignSelf: "flex-end" }} disabled={busy} onClick={saveCalculator}>Save route</button>
       </div>
+      {(calc.oneWay != null || calc.err) && (
+        <p style={{ margin: "8px 0 0" }}>
+          {calc.err
+            ? <small className="neg">Distance lookup failed: {calc.err}</small>
+            : <small className="hint">Most direct route: {calc.oneWay} mi one-way · {draft.round_trip_miles} mi round-trip. Remember to Save route.</small>}
+        </p>
+      )}
 
       <h3>Drivers ({driverIds.length}) — total {money(reimb * driverIds.length)}</h3>
       <PersonPicker
-        value={driverIds}
-        pool={adults}
+        value={driverIds.map((id) => `id:${id}`)}
+        pool={pool}
         busy={busy}
-        onChange={(ids) => run(() => api.setDrivers(group.id, ids))}
+        onChange={(refs) => run(() => api.setDrivers(group.id, refs))}
         placeholder="Add a driver — or paste names/emails"
       />
     </div>
@@ -466,7 +655,7 @@ function TravelGroup({ group, bundle, run, busy }: { group: CostGroup } & TabPro
 }
 
 // ------------------------------------------------------------------ Patrols (cost groups + attendance)
-function Patrols({ bundle, run, busy }: TabProps) {
+function Patrols({ bundle, roster, run, busy }: TabProps) {
   const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
   const [name, setName] = useState("");
   const [kind, setKind] = useState("patrol");
@@ -495,7 +684,7 @@ function Patrols({ bundle, run, busy }: TabProps) {
       </div>
 
       {costGroups.map((g) => (
-        <MembersEditor key={g.id} group={g} bundle={bundle} run={run} busy={busy} />
+        <MembersEditor key={g.id} group={g} bundle={bundle} roster={roster} run={run} busy={busy} />
       ))}
     </div>
   );
@@ -506,36 +695,36 @@ function norm(s: string): string {
   return s.toLowerCase().replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function matchPerson(token: string, people: Person[]): Person | null {
+function matchPick(token: string, pool: PickItem[]): PickItem | null {
   const t = token.trim();
   if (!t) return null;
   if (t.includes("@")) {
     const e = t.toLowerCase();
-    return people.find((p) => (p.email ?? "").toLowerCase() === e) ?? null;
+    return pool.find((p) => (p.email ?? "").toLowerCase() === e) ?? null;
   }
   const n = norm(t);
-  return people.find((p) => norm(p.name) === n) ?? null;
+  return pool.find((p) => norm(p.name) === n) ?? null;
 }
 
 /**
  * Chips + autocomplete + paste UI for picking a set of people from a pool.
- * Used for cost-group attendance (full roster pool) and travel drivers
- * (adults-only pool). All mutations go through onChange(nextIds).
+ * Works in "ref space": value and onChange use refs ("id:N" / "bsa:NNN"), so
+ * both local people and (not-yet-projected) roster members are selectable.
  */
 function PersonPicker({
   value, pool, busy, onChange, placeholder,
 }: {
-  value: number[];
-  pool: Person[];
+  value: string[];
+  pool: PickItem[];
   busy: boolean;
-  onChange: (nextIds: number[]) => void;
+  onChange: (nextRefs: string[]) => void;
   placeholder?: string;
 }) {
   const valueSet = useMemo(() => new Set(value), [value]);
-  const poolById = useMemo(() => new Map(pool.map((p) => [p.id, p])), [pool]);
+  const byRef = useMemo(() => new Map(pool.map((p) => [p.ref, p])), [pool]);
   const selected = value
-    .map((id) => poolById.get(id))
-    .filter((p): p is Person => !!p)
+    .map((ref) => byRef.get(ref))
+    .filter((p): p is PickItem => !!p)
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const [query, setQuery] = useState("");
@@ -544,7 +733,7 @@ function PersonPicker({
   const candidates = useMemo(() => {
     const q = query.trim().toLowerCase();
     return pool
-      .filter((p) => !valueSet.has(p.id))
+      .filter((p) => !valueSet.has(p.ref))
       .filter((p) =>
         !q ||
         p.name.toLowerCase().includes(q) ||
@@ -554,8 +743,8 @@ function PersonPicker({
       .slice(0, 8);
   }, [query, pool, valueSet]);
 
-  function add(id: number) { setNote(null); setQuery(""); onChange([...value, id]); }
-  function remove(id: number) { setNote(null); onChange(value.filter((x) => x !== id)); }
+  function add(ref: string) { setNote(null); setQuery(""); onChange([...value, ref]); }
+  function remove(ref: string) { setNote(null); onChange(value.filter((x) => x !== ref)); }
 
   function onPaste(e: ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
@@ -566,8 +755,8 @@ function PersonPicker({
     const unmatched: string[] = [];
     let added = 0;
     for (const tok of tokens) {
-      const p = matchPerson(tok, pool);
-      if (p) { if (!next.has(p.id)) added++; next.add(p.id); }
+      const p = matchPick(tok, pool);
+      if (p) { if (!next.has(p.ref)) added++; next.add(p.ref); }
       else unmatched.push(tok);
     }
     setQuery("");
@@ -579,9 +768,9 @@ function PersonPicker({
     <>
       <div className="chips">
         {selected.map((p) => (
-          <span key={p.id} className={`chip ${p.type === "scout" ? "chip-youth" : "chip-adult"}`}>
+          <span key={p.ref} className={`chip ${p.type === "scout" ? "chip-youth" : "chip-adult"}`}>
             <span>{p.name}</span>
-            <button type="button" disabled={busy} onClick={() => remove(p.id)} aria-label={`Remove ${p.name}`}>×</button>
+            <button type="button" disabled={busy} onClick={() => remove(p.ref)} aria-label={`Remove ${p.name}`}>×</button>
           </span>
         ))}
         {selected.length === 0 && <span className="hint">No one added yet.</span>}
@@ -596,21 +785,16 @@ function PersonPicker({
           onKeyDown={(e) => {
             if (e.key === "Enter" && candidates[0]) {
               e.preventDefault();
-              add(candidates[0].id);
+              add(candidates[0].ref);
             }
           }}
         />
         {query && candidates.length > 0 && (
           <div className="ac-menu">
             {candidates.map((p) => (
-              <button type="button" key={p.id} disabled={busy} onClick={() => add(p.id)}>
+              <button type="button" key={p.ref} disabled={busy} onClick={() => add(p.ref)}>
                 <span>{p.name}</span>
-                <span className="hint">
-                  {p.type === "scout"
-                    ? `youth${p.parent_id ? " · " + (poolById.get(p.parent_id)?.name ?? "") : ""}`
-                    : "adult"}
-                  {p.email ? ` · ${p.email}` : ""}
-                </span>
+                <span className="hint">{p.sub}{p.email ? ` · ${p.email}` : ""}</span>
               </button>
             ))}
           </div>
@@ -621,10 +805,11 @@ function PersonPicker({
   );
 }
 
-function MembersEditor({ group, bundle, run, busy }: { group: CostGroup } & TabProps) {
+function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup } & TabProps) {
   const { personById } = useMaps(bundle);
   const summary = bundle.groupSummaries.find((s) => s.group.id === group.id)!;
   const memberIds = summary.memberIds;
+  const pool = useMemo(() => buildPool(bundle, roster, "all"), [bundle, roster]);
 
   // For each billable adult, the contributors (themselves + their attending youth).
   const shareBreakdown = useMemo(() => {
@@ -672,10 +857,10 @@ function MembersEditor({ group, bundle, run, busy }: { group: CostGroup } & TabP
       </div>
 
       <PersonPicker
-        value={memberIds}
-        pool={bundle.people}
+        value={memberIds.map((id) => `id:${id}`)}
+        pool={pool}
         busy={busy}
-        onChange={(ids) => run(() => api.setMembers(group.id, ids))}
+        onChange={(refs) => run(() => api.setMembers(group.id, refs))}
       />
 
       {orphaned && (
@@ -711,11 +896,11 @@ function MembersEditor({ group, bundle, run, busy }: { group: CostGroup } & TabP
 }
 
 // ------------------------------------------------------------------ Settings (sheet config + roster)
-function Settings({ bundle, run, busy }: TabProps) {
+function Settings({ bundle, roster, run, busy }: TabProps) {
   return (
     <>
-      <SheetSettings bundle={bundle} run={run} busy={busy} />
-      <Roster bundle={bundle} run={run} busy={busy} />
+      <SheetSettings bundle={bundle} roster={roster} run={run} busy={busy} />
+      <Roster bundle={bundle} roster={roster} run={run} busy={busy} />
     </>
   );
 }
@@ -727,6 +912,7 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
   const [pdoc, setPdoc] = useState(trip.planning_doc_url ?? "");
   const [slack, setSlack] = useState(trip.slack_url ?? "");
   const [rate, setRate] = useState(String(trip.mileage_rate));
+  const [units, setUnits] = useState(trip.roster_units.join(", "));
 
   useEffect(() => {
     setSlug(trip.slug);
@@ -734,7 +920,8 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
     setPdoc(trip.planning_doc_url ?? "");
     setSlack(trip.slack_url ?? "");
     setRate(String(trip.mileage_rate));
-  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate]);
+    setUnits(trip.roster_units.join(", "));
+  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate, trip.roster_units.join(",")]);
 
   function save(patch: Record<string, unknown>) {
     run(() => api.updateTrip(trip.id, patch));
@@ -795,92 +982,135 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
             onBlur={() => slack !== (trip.slack_url ?? "") && save({ slack_url: slack || null })}
           />
         </label>
+        <label className="fld" style={{ flex: 1, minWidth: 220 }}>Roster units (from roster-db)
+          <input
+            value={units}
+            disabled={busy}
+            placeholder="Troop 10 F, Crew 10"
+            onChange={(e) => setUnits(e.target.value)}
+            onBlur={() => {
+              const next = units.split(",").map((s) => s.trim()).filter(Boolean);
+              if (next.join(",") !== trip.roster_units.join(",")) save({ roster_units: next });
+            }}
+          />
+          <small className="hint">Comma-separated; which units populate the picker.</small>
+        </label>
       </div>
     </div>
   );
 }
 
 // ------------------------------------------------------------------ Roster
-function Roster({ bundle, run, busy }: TabProps) {
-  const { personById, adults } = useMaps(bundle);
-  const scouts = bundle.people
-    .filter((p) => p.type === "scout")
+// The registered roster is read from roster-db (read-only). Only unregistered
+// additions (guests) are stored locally and can be added/removed here.
+function Roster({ bundle, roster, run, busy }: TabProps) {
+  const { personById } = useMaps(bundle);
+  const adultPool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
+
+  const regAdults = roster.filter((m) => m.type === "adult");
+  const regYouth = roster.filter((m) => m.type === "scout");
+  const guests = bundle.people
+    .filter((p) => p.source === "local")
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const [name, setName] = useState("");
-  const [code, setCode] = useState("");
-  const [email, setEmail] = useState("");
-  const [type, setType] = useState("adult");
-  const [parentId, setParentId] = useState<number>(adults[0]?.id ?? 0);
+  const [type, setType] = useState("scout");
+  const [parentRef, setParentRef] = useState<string>("");
+
+  const effectiveParent = parentRef || adultPool[0]?.ref || "";
 
   function add() {
-    if (!name) return;
+    if (!name.trim()) return;
     run(() =>
       api.addPerson(bundle.trip.id, {
-        name, code: code || undefined, email: email || undefined, type,
-        parent_id: type === "scout" ? parentId : null,
+        name: name.trim(),
+        type,
+        parent_ref: type === "scout" ? effectiveParent : undefined,
       }),
-    ).then(() => { setName(""); setCode(""); setEmail(""); });
+    ).then(() => { setName(""); });
   }
 
   return (
     <div className="card">
       <h2>Roster</h2>
-      <div className="row" style={{ marginBottom: 14 }}>
-        <label className="fld" style={{ flex: 1, minWidth: 150 }}>Name
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="fld">Code
-          <input className="sm" value={code} onChange={(e) => setCode(e.target.value)} />
-        </label>
-        <label className="fld" style={{ flex: 1, minWidth: 160 }}>Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="optional" inputMode="email" />
+      <p><small className="hint">
+        Registered members come from <strong>roster-db</strong> (units: {bundle.trip.roster_units.join(", ") || "none"})
+        and are read-only here. Add unregistered attendees (e.g. visiting cub scouts) as guests below —
+        they stay local to this sheet and are never written back to roster-db.
+      </small></p>
+
+      <h3>Add a guest (unregistered)</h3>
+      <div className="row" style={{ marginBottom: 16 }}>
+        <label className="fld" style={{ flex: 1, minWidth: 180 }}>Name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Claire S." />
         </label>
         <label className="fld">Type
           <select value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="scout">youth</option>
             <option value="adult">adult</option>
-            <option value="scout">scout</option>
           </select>
         </label>
         {type === "scout" && (
-          <label className="fld">Parent
-            <select value={parentId} onChange={(e) => setParentId(Number(e.target.value))}>
-              {adults.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          <label className="fld" style={{ minWidth: 180 }}>Billed to
+            <select value={effectiveParent} onChange={(e) => setParentRef(e.target.value)}>
+              {adultPool.map((p) => <option key={p.ref} value={p.ref}>{p.name}</option>)}
             </select>
           </label>
         )}
-        <button className="btn" disabled={busy || !name} onClick={add}>Add person</button>
+        <button className="btn" disabled={busy || !name.trim()} onClick={add}>Add guest</button>
       </div>
+
+      {guests.length > 0 && (
+        <table style={{ marginBottom: 18 }}>
+          <thead>
+            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th></th></tr>
+          </thead>
+          <tbody>
+            {guests.map((p) => (
+              <tr key={p.id}>
+                <td>{p.name} <span className="pill">guest</span></td>
+                <td className="hint">{p.type === "scout" ? "youth" : "adult"}</td>
+                <td className="hint">{p.parent_id ? personById.get(p.parent_id)?.name ?? "—" : "—"}</td>
+                <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <div className="row" style={{ alignItems: "flex-start" }}>
         <div style={{ flex: 1, minWidth: 280 }}>
-          <h3>Adults ({adults.length})</h3>
-          <table>
-            <tbody>
-              {adults.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.name} {p.code && <span className="hint">({p.code})</span>}</td>
-                  <td className="hint">{p.email}</td>
-                  <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <h3>Registered adults ({regAdults.length})</h3>
+          <div style={{ maxHeight: 360, overflow: "auto" }}>
+            <table>
+              <tbody>
+                {regAdults.map((m) => (
+                  <tr key={m.bsa_number}>
+                    <td>{m.name}</td>
+                    <td className="hint">{m.email}</td>
+                  </tr>
+                ))}
+                {regAdults.length === 0 && <tr><td className="empty">No roster loaded.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
         <div style={{ flex: 1, minWidth: 280 }}>
-          <h3>Scouts ({scouts.length})</h3>
-          <table>
-            <tbody>
-              {scouts.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.name}</td>
-                  <td className="hint">{p.parent_id ? personById.get(p.parent_id)?.name : "—"}</td>
-                  <td className="hint">{p.email}</td>
-                  <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <h3>Registered youth ({regYouth.length})</h3>
+          <div style={{ maxHeight: 360, overflow: "auto" }}>
+            <table>
+              <tbody>
+                {regYouth.map((m) => (
+                  <tr key={m.bsa_number}>
+                    <td>{m.name}</td>
+                    <td className="hint">{m.patrol}</td>
+                    <td className="hint">{m.guardian?.name}</td>
+                  </tr>
+                ))}
+                {regYouth.length === 0 && <tr><td className="empty">No roster loaded.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>

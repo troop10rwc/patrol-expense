@@ -1,4 +1,4 @@
-import type { Trip, TripBundle, SettlementStatus } from "../shared/types.ts";
+import type { Trip, TripBundle, SettlementStatus, RosterMember } from "../shared/types.ts";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -16,6 +16,7 @@ export const api = {
   listTrips: () => req<Trip[]>("/api/trips"),
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),
   getTripByUuid: (uuid: string) => req<TripBundle>(`/api/by-uuid/${uuid}`),
+  getRoster: (tripId: number) => req<RosterMember[]>(`/api/trips/${tripId}/roster`),
   seed: () => req<TripBundle>("/api/seed", { method: "POST" }),
 
   updateTrip: (id: number, body: Partial<Trip>) =>
@@ -23,7 +24,7 @@ export const api = {
 
   addPerson: (
     tripId: number,
-    body: { name: string; code?: string; email?: string; type: string; parent_id?: number | null },
+    body: { name: string; code?: string; email?: string; type: string; parent_id?: number | null; parent_ref?: string },
   ) => req<TripBundle>(`/api/trips/${tripId}/people`, { method: "POST", body: JSON.stringify(body) }),
   deletePerson: (pid: number) => req<TripBundle>(`/api/people/${pid}`, { method: "DELETE" }),
 
@@ -32,14 +33,16 @@ export const api = {
   updateGroup: (gid: number, body: Record<string, unknown>) =>
     req<TripBundle>(`/api/groups/${gid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGroup: (gid: number) => req<TripBundle>(`/api/groups/${gid}`, { method: "DELETE" }),
-  setDrivers: (gid: number, person_ids: number[]) =>
-    req<TripBundle>(`/api/groups/${gid}/drivers`, { method: "PUT", body: JSON.stringify({ person_ids }) }),
-  setMembers: (gid: number, person_ids: number[]) =>
-    req<TripBundle>(`/api/groups/${gid}/members`, { method: "PUT", body: JSON.stringify({ person_ids }) }),
+  // refs are "id:<localId>" or "bsa:<bsaNumber>"; roster members are projected
+  // into the local people table server-side.
+  setDrivers: (gid: number, refs: string[]) =>
+    req<TripBundle>(`/api/groups/${gid}/drivers`, { method: "PUT", body: JSON.stringify({ refs }) }),
+  setMembers: (gid: number, refs: string[]) =>
+    req<TripBundle>(`/api/groups/${gid}/members`, { method: "PUT", body: JSON.stringify({ refs }) }),
 
   addExpense: (
     tripId: number,
-    body: { group_id: number; description: string; amount: number; payer_id: number },
+    body: { group_id: number; description: string; amount: number; payer_ref: string },
   ) => req<TripBundle>(`/api/trips/${tripId}/expenses`, { method: "POST", body: JSON.stringify(body) }),
   deleteExpense: (eid: number) => req<TripBundle>(`/api/expenses/${eid}`, { method: "DELETE" }),
 
@@ -52,7 +55,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ status }),
     }),
+
+  geoAutocomplete: (q: string) =>
+    req<{ description: string }[]>(`/api/geo/autocomplete?q=${encodeURIComponent(q)}`),
+  geoDistance: (from: string, to: string) =>
+    req<{ one_way_miles: number; round_trip_miles: number }>(
+      `/api/geo/distance?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    ),
 };
+
+export const HOME_ADDRESS = "651 El Camino Real, Redwood City, CA";
 
 export function money(n: number): string {
   const sign = n < 0 ? "-" : "";
