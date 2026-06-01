@@ -4,10 +4,21 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "observability": { "enabled": true },
+  "vars": { "ENVIRONMENT": "production" },
+  // Serve the app as a same-origin tab at troop10rwc.org/expenses. Requires
+  // troop10rwc.org to be a Cloudflare zone on this account (proxied DNS).
+  // Everything else on the domain falls through to the existing site.
+  "routes": [
+    { "pattern": "troop10rwc.org/expenses*", "zone_name": "troop10rwc.org" }
+  ],
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    // The app is mounted under /expenses. The Worker owns the whole subpath:
+    // it strips the prefix and serves the API, auth, and (via the ASSETS
+    // binding) the SPA — since assets are built with Vite base "/expenses/"
+    // but stored at their root paths.
+    "run_worker_first": ["/expenses/*"]
   },
   "d1_databases": [
     {

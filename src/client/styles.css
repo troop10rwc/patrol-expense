@@ -73,6 +73,20 @@ table.trips tbody tr:hover { background: var(--bg); }
 .modal .row { gap: 8px; }
 .req { color: var(--neg); }
 
+/* Auth */
+.signin { max-width: 460px; text-align: center; padding-top: 12vh; }
+.signin h1 { margin-bottom: 6px; }
+.btn.slack-btn {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 15px;
+  padding: 10px 18px; background: #4a154b; /* Slack aubergine */
+}
+.btn.slack-btn span { font-size: 18px; }
+.account-bar {
+  display: flex; justify-content: flex-end; align-items: center; gap: 10px;
+  max-width: 1080px; margin: 0 auto; padding: 10px 16px 0;
+}
+.btn.sm-btn { padding: 4px 10px; font-size: 12px; }
+
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 16px 0 18px; flex-wrap: wrap; }
 .tabs button {
   background: none; border: none; padding: 9px 14px; cursor: pointer;

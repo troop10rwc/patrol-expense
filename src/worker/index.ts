@@ -5,18 +5,31 @@ import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, sc
 import { fetchRoster } from "./roster.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
+import { authApp, requireAuth, type AuthBindings, type SessionUser } from "./auth.ts";
+import { BASE_PATH } from "../shared/constants.ts";
 
-interface Bindings {
-  DB: D1Database;
-  ROSTER: D1Database;
+interface Bindings extends AuthBindings {
   ASSETS: Fetcher;
   GOOGLE_MAPS_API_KEY?: string;
+  ENVIRONMENT?: string; // "development" in dev (.dev.vars); "production" otherwise
 }
 
+type Env = { Bindings: Bindings; Variables: { user: SessionUser } };
 type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 
-const app = new Hono<{ Bindings: Bindings }>();
-const api = new Hono<{ Bindings: Bindings }>();
+// API + auth routes (mounted at /api and /auth, with the /expenses prefix
+// stripped by the default fetch handler below).
+const app = new Hono<Env>();
+const api = new Hono<Env>();
+
+// Every API route requires a signed-in, roster-linked Slack user.
+api.use("*", requireAuth);
+
+// Who am I? (also the client's auth probe — 401 when signed out.)
+api.get("/me", (c) => {
+  const u = c.get("user");
+  return c.json({ id: u.uid, name: u.name, bsa_number: u.bsa });
+});
 
 const bad = (msg: string) => ({ error: msg });
 
@@ -383,6 +396,34 @@ api.post("/seed", async (c) => {
 
 api.notFound((c) => c.json(bad("not found"), 404));
 
+app.route("/auth", authApp);
 app.route("/api", api);
 
-export default app;
+// The app is mounted under /expenses. This handler owns the whole subpath:
+// strip the prefix, then route /api and /auth to Hono and everything else to
+// the static assets (SPA). Assets are built with Vite base "/expenses/" but
+// stored at their root paths, so the prefix must be stripped before serving.
+export default {
+  async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (!url.pathname.startsWith(BASE_PATH)) {
+      return new Response("Not found", { status: 404 });
+    }
+    const rel = url.pathname.slice(BASE_PATH.length) || "/";
+
+    if (rel === "/api" || rel.startsWith("/api/") || rel === "/auth" || rel.startsWith("/auth/")) {
+      const inner = new URL(url);
+      inner.pathname = rel;
+      return app.fetch(new Request(inner.toString(), request), env, ctx);
+    }
+
+    // Assets/SPA. In dev the Vite dev server expects the "/expenses"-prefixed
+    // path; in prod the built files live at root, so the prefix is stripped.
+    if (env.ENVIRONMENT === "development") {
+      return env.ASSETS.fetch(request);
+    }
+    const assetUrl = new URL(url);
+    assetUrl.pathname = rel;
+    return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+  },
+};

@@ -9,7 +9,8 @@ import type {
   RosterMember,
   PersonType,
 } from "../shared/types.ts";
-import { api, money, HOME_ADDRESS } from "./api.ts";
+import { api, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
+import { BASE_PATH } from "../shared/constants.ts";
 
 type Tab = "patrols" | "travel" | "expenses" | "reimbursement" | "settings";
 const TAB_ORDER: Tab[] = ["patrols", "travel", "expenses", "reimbursement", "settings"];
@@ -22,10 +23,54 @@ const labels: Record<Tab, string> = {
 };
 const UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
-// Tiny router: `/` -> index of trips; `/<uuid>/<slug>` -> that trip's app.
+// Build an in-app href / read the path relative to the mount point.
+const appHref = (p: string) => `${BASE_PATH}${p}`;
+function appPath(): string {
+  const p = location.pathname;
+  return (p.startsWith(BASE_PATH) ? p.slice(BASE_PATH.length) : p) || "/";
+}
+
+// Auth gate: every page requires a signed-in, roster-linked Slack user.
 export function App() {
-  const m = location.pathname.slice(1).match(UUID_RE);
-  return m ? <TripView uuid={m[1]} /> : <IndexPage />;
+  const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined=loading
+  useEffect(() => {
+    api.me()
+      .then(setMe)
+      .catch((e) => { if (e instanceof UnauthorizedError) setMe(null); else { console.error(e); setMe(null); } });
+  }, []);
+
+  if (me === undefined) return <div className="wrap">Loading…</div>;
+  if (me === null) return <SignIn />;
+
+  const m = appPath().slice(1).match(UUID_RE);
+  return (
+    <>
+      <AccountBar me={me} />
+      {m ? <TripView uuid={m[1]} /> : <IndexPage />}
+    </>
+  );
+}
+
+function SignIn() {
+  return (
+    <div className="wrap signin">
+      <h1>Troop 10 Expenses</h1>
+      <p className="empty">Sign in with your Troop 10 Slack account to view and manage trip expenses.</p>
+      <a className="btn slack-btn" href={loginUrl}>
+        <span aria-hidden>＃</span> Sign in with Slack
+      </a>
+      <p><small className="hint">Access is limited to troop members linked in the roster.</small></p>
+    </div>
+  );
+}
+
+function AccountBar({ me }: { me: Me }) {
+  return (
+    <div className="account-bar">
+      <span className="hint">Signed in as <strong>{me.name}</strong></span>
+      <a className="btn ghost sm-btn" href={logoutUrl}>Sign out</a>
+    </div>
+  );
 }
 
 // ------------------------------------------------------------------ Index page
@@ -55,7 +100,7 @@ function IndexPage() {
   // Create the trip, then open it.
   async function createTrip(input: { name: string; trip_date: string | null; slack_url: string | null }) {
     const bundle = await api.createTrip(input);
-    location.href = `/${bundle.trip.uuid}/${bundle.trip.slug}`;
+    location.href = appHref(`/${bundle.trip.uuid}/${bundle.trip.slug}`);
   }
 
   if (!summaries) return <div className="wrap">Loading…</div>;
@@ -98,7 +143,7 @@ function IndexPage() {
               {summaries.map((s) => (
                 <tr key={s.trip.uuid}>
                   <td>
-                    <a className="trip-link" href={`/${s.trip.uuid}/${s.trip.slug}#expenses`}>
+                    <a className="trip-link" href={appHref(`/${s.trip.uuid}/${s.trip.slug}#expenses`)}>
                       {s.trip.name}
                     </a>
                   </td>
@@ -220,7 +265,7 @@ function TripView({ uuid }: { uuid: string }) {
   // Preserve the current tab as a hash so links/back stay meaningful.
   useEffect(() => {
     if (!bundle) return;
-    const want = `/${bundle.trip.uuid}/${bundle.trip.slug}#${tab}`;
+    const want = appHref(`/${bundle.trip.uuid}/${bundle.trip.slug}#${tab}`);
     if (location.pathname + location.hash !== want) history.replaceState(null, "", want);
   }, [bundle?.trip.uuid, bundle?.trip.slug, tab]);
 
@@ -265,7 +310,7 @@ function TripView({ uuid }: { uuid: string }) {
   if (!bundle) {
     return (
       <div className="wrap">
-        <p><a className="back-link" href="/">← All trips</a></p>
+        <p><a className="back-link" href={appHref("/")}>← All trips</a></p>
         <div className="err">{error ?? "Trip not found."}</div>
       </div>
     );
@@ -274,7 +319,7 @@ function TripView({ uuid }: { uuid: string }) {
   const t = bundle.trip;
   return (
     <div className="wrap">
-      <p style={{ margin: "0 0 8px" }}><a className="back-link" href="/">← All trips</a></p>
+      <p style={{ margin: "0 0 8px" }}><a className="back-link" href={appHref("/")}>← All trips</a></p>
       <header className="app">
         <div style={{ flex: 1, minWidth: 220 }}>
           <input

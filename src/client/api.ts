@@ -1,11 +1,18 @@
 import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember } from "../shared/types.ts";
+import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
+/** Thrown when an API call returns 401 — the caller should show sign-in. */
+export class UnauthorizedError extends Error {
+  constructor() { super("unauthorized"); }
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE_PATH}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error((body as any).error ?? `Request failed: ${res.status}`);
@@ -13,7 +20,17 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface Me {
+  id: string; // slack user id
+  name: string;
+  bsa_number: string | null;
+}
+
+export const loginUrl = `${BASE_PATH}/auth/login`;
+export const logoutUrl = `${BASE_PATH}/auth/logout`;
+
 export const api = {
+  me: () => req<Me>("/api/me"),
   listTrips: () => req<Trip[]>("/api/trips"),
   getSummary: () => req<TripSummary[]>("/api/summary"),
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),
