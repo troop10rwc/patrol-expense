@@ -10,6 +10,7 @@ import type {
 } from "../shared/types.ts";
 import { computeGroupSummaries, computePaysheet, travelReimbursement, type EngineInput } from "./engine.ts";
 import { fetchRosterMember } from "./roster.ts";
+import { HOME_ADDRESS } from "../shared/constants.ts";
 
 /** Raw trip row: roster_units arrives as a JSON string from D1. */
 type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
@@ -109,6 +110,26 @@ export async function regenerateTravelExpenses(db: D1Database, groupId: number):
       .bind(trip.id, target, `Travel reimbursement: ${group.name}`, amount, d.person_id, groupId),
   );
   if (stmts.length) await db.batch(stmts);
+}
+
+/**
+ * Give a brand-new trip a minimal usable skeleton: a single Unit:Overall cost
+ * group and one travel route ("Primary", origin defaulted to the troop's home
+ * base, charged to the Unit group). Patrols are added by the user as needed.
+ */
+export async function scaffoldDefaultGroups(db: D1Database, tripId: number): Promise<void> {
+  const unit = await db
+    .prepare("INSERT INTO cost_groups (trip_id, name, kind, sort_order) VALUES (?, 'Unit:Overall', 'unit', 0)")
+    .bind(tripId)
+    .run();
+  const unitId = unit.meta.last_row_id;
+
+  await db
+    .prepare(
+      "INSERT INTO cost_groups (trip_id, name, kind, sort_order, origin, tolls, cost_group_id) VALUES (?, 'Primary', 'travel', 10, ?, 0, ?)",
+    )
+    .bind(tripId, HOME_ADDRESS, unitId)
+    .run();
 }
 
 const last4 = (bsa: string) => bsa.slice(-4);

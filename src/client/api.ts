@@ -1,4 +1,5 @@
-import type { Trip, TripBundle, SettlementStatus, RosterMember } from "../shared/types.ts";
+import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember } from "../shared/types.ts";
+export { HOME_ADDRESS } from "../shared/constants.ts";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -14,10 +15,14 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listTrips: () => req<Trip[]>("/api/trips"),
+  getSummary: () => req<TripSummary[]>("/api/summary"),
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),
   getTripByUuid: (uuid: string) => req<TripBundle>(`/api/by-uuid/${uuid}`),
   getRoster: (tripId: number) => req<RosterMember[]>(`/api/trips/${tripId}/roster`),
   seed: () => req<TripBundle>("/api/seed", { method: "POST" }),
+
+  createTrip: (body: { name: string; trip_date?: string | null; slack_url?: string | null }) =>
+    req<TripBundle>("/api/trips", { method: "POST", body: JSON.stringify(body) }),
 
   updateTrip: (id: number, body: Partial<Trip>) =>
     req<TripBundle>(`/api/trips/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -64,7 +69,6 @@ export const api = {
     ),
 };
 
-export const HOME_ADDRESS = "651 El Camino Real, Redwood City, CA";
 
 export function money(n: number): string {
   const sign = n < 0 ? "-" : "";

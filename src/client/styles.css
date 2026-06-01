@@ -49,6 +49,30 @@ input.title-input:disabled { opacity: 1; background: transparent; }
 
 .tabs button.tab-gear { font-size: 18px; padding: 7px 10px; line-height: 1; }
 
+/* Index page */
+a.back-link { font-size: 13px; color: var(--muted); text-decoration: none; }
+a.back-link:hover { color: var(--accent); }
+table.trips td, table.trips th { padding: 10px 12px; }
+table.trips a.trip-link { font-weight: 600; font-size: 15px; text-decoration: none; }
+table.trips a.trip-link:hover { text-decoration: underline; }
+table.trips tbody tr:hover { background: var(--bg); }
+
+/* Modal */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(20,30,50,.38);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 12vh 16px; z-index: 50;
+}
+.modal {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px; width: 100%; max-width: 420px;
+  box-shadow: 0 18px 50px rgba(20,30,50,.25);
+}
+.modal .fld { width: 100%; }
+.modal .fld input { width: 100%; }
+.modal .row { gap: 8px; }
+.req { color: var(--neg); }
+
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 16px 0 18px; flex-wrap: wrap; }
 .tabs button {
   background: none; border: none; padding: 9px 14px; cursor: pointer;

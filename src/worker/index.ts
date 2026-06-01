@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Trip } from "../shared/types.ts";
 import { slugify } from "../shared/slug.ts";
-import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip } from "./db.ts";
+import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups } from "./db.ts";
 import { fetchRoster } from "./roster.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
@@ -32,6 +32,25 @@ api.get("/trips", async (c) => {
   return c.json(results.map(normalizeTrip));
 });
 
+// Per-trip rollups for the index page (total cost + reimbursement progress).
+api.get("/summary", async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT id FROM trips ORDER BY id DESC").all<{ id: number }>();
+  const out = [];
+  for (const { id } of results) {
+    const bundle = await loadTripBundle(c.env.DB, id);
+    if (!bundle) continue;
+    const settle = bundle.paysheet.rows.filter((r) => Math.abs(r.outstanding) > 0.005);
+    out.push({
+      trip: bundle.trip,
+      totalCost: bundle.paysheet.totalExpenses,
+      expenseCount: bundle.expenses.length,
+      settleTotal: settle.length,
+      settleDone: settle.filter((r) => r.status === "paid").length,
+    });
+  }
+  return c.json(out);
+});
+
 // Live roster (adults + youth) for the trip's configured units, read from
 // the external roster-db. Feeds the picker and the Settings roster view.
 api.get("/trips/:id/roster", async (c) => {
@@ -53,6 +72,7 @@ api.post("/trips", async (c) => {
   )
     .bind(uuid, slug, b.name, b.trip_date ?? null, b.planning_doc_url ?? null, b.slack_url ?? null, b.mileage_rate ?? 0.28)
     .run();
+  await scaffoldDefaultGroups(c.env.DB, res.meta.last_row_id);
   return c.json(await bundleResponse(c.env.DB, res.meta.last_row_id), 201);
 });
 

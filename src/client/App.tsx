@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type {
   TripBundle,
+  TripSummary,
   Person,
   CostGroup,
   GroupSummary,
@@ -21,49 +22,212 @@ const labels: Record<Tab, string> = {
 };
 const UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
+// Tiny router: `/` -> index of trips; `/<uuid>/<slug>` -> that trip's app.
 export function App() {
+  const m = location.pathname.slice(1).match(UUID_RE);
+  return m ? <TripView uuid={m[1]} /> : <IndexPage />;
+}
+
+// ------------------------------------------------------------------ Index page
+function IndexPage() {
+  const [summaries, setSummaries] = useState<TripSummary[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showNew, setShowNew] = useState(false);
+
+  useEffect(() => {
+    api.getSummary().then(setSummaries).catch((e) => { setError(String(e)); setSummaries([]); });
+  }, []);
+
+  async function seed() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.seed();
+      setSummaries(await api.getSummary());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Create the trip, then open it.
+  async function createTrip(input: { name: string; trip_date: string | null; slack_url: string | null }) {
+    const bundle = await api.createTrip(input);
+    location.href = `/${bundle.trip.uuid}/${bundle.trip.slug}`;
+  }
+
+  if (!summaries) return <div className="wrap">Loading…</div>;
+
+  return (
+    <div className="wrap">
+      <header className="app">
+        <div>
+          <h1>Patrol Expense</h1>
+          <div className="meta"><span>Troop trip expense sheets</span></div>
+        </div>
+        <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
+      </header>
+
+      {error && <div className="err">{error}</div>}
+
+      {showNew && <NewTripModal onClose={() => setShowNew(false)} onCreate={createTrip} />}
+
+      {summaries.length === 0 ? (
+        <div className="card">
+          <p className="empty">No trips yet.</p>
+          <button className="btn" disabled={busy} onClick={seed}>
+            {busy ? "Loading…" : "Load 2026 Winter Lodge sample"}
+          </button>
+        </div>
+      ) : (
+        <div className="card">
+          <table className="trips">
+            <thead>
+              <tr>
+                <th>Trip</th>
+                <th>Date</th>
+                <th>Planning doc</th>
+                <th>Slack channel</th>
+                <th className="num">Total cost</th>
+                <th className="num">Reimbursed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaries.map((s) => (
+                <tr key={s.trip.uuid}>
+                  <td>
+                    <a className="trip-link" href={`/${s.trip.uuid}/${s.trip.slug}#expenses`}>
+                      {s.trip.name}
+                    </a>
+                  </td>
+                  <td className="hint">{s.trip.trip_date ?? "—"}</td>
+                  <td>
+                    {s.trip.planning_doc_url
+                      ? <a href={s.trip.planning_doc_url} target="_blank" rel="noreferrer">Doc ↗</a>
+                      : <span className="hint">—</span>}
+                  </td>
+                  <td>
+                    {s.trip.slack_url
+                      ? <a href={s.trip.slack_url} target="_blank" rel="noreferrer">Channel ↗</a>
+                      : <span className="hint">—</span>}
+                  </td>
+                  <td className="num">{money(s.totalCost)}</td>
+                  <td className="num">
+                    {s.settleTotal > 0
+                      ? <span className={s.settleDone === s.settleTotal ? "pos" : ""}>{s.settleDone}/{s.settleTotal} settled</span>
+                      : <span className="hint">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewTripModal({
+  onClose, onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (input: { name: string; trip_date: string | null; slack_url: string | null }) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [date, setDate] = useState("");
+  const [slack, setSlack] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onCreate({ name: name.trim(), trip_date: date || null, slack_url: slack.trim() || null });
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ marginTop: 0 }}>New trip</h2>
+        {error && <div className="err">{error}</div>}
+        <label className="fld" style={{ marginBottom: 10 }}>Name <span className="req">*</span>
+          <input
+            autoFocus
+            value={name}
+            disabled={busy}
+            placeholder="e.g. 2026 Summer Camp"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+          />
+        </label>
+        <label className="fld" style={{ marginBottom: 10 }}>Date <span className="hint">(optional)</span>
+          <input type="date" value={date} disabled={busy} onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <label className="fld" style={{ marginBottom: 16 }}>Slack channel <span className="hint">(optional)</span>
+          <input
+            value={slack}
+            disabled={busy}
+            placeholder="https://….slack.com/archives/…"
+            inputMode="url"
+            onChange={(e) => setSlack(e.target.value)}
+          />
+        </label>
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="btn" disabled={busy || !name.trim()} onClick={submit}>
+            {busy ? "Creating…" : "Create trip"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ Trip view
+function TripView({ uuid }: { uuid: string }) {
   const [bundle, setBundle] = useState<TripBundle | null>(null);
   const [roster, setRoster] = useState<RosterMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("patrols");
+  const [tab, setTab] = useState<Tab>(() => {
+    const h = location.hash.slice(1) as Tab;
+    return (TAB_ORDER as string[]).includes(h) ? h : "patrols";
+  });
   const [titleDraft, setTitleDraft] = useState("");
 
-  // Load: prefer the trip from URL (/:uuid/:slug); else first trip in DB.
   useEffect(() => {
     (async () => {
       try {
-        const m = location.pathname.slice(1).match(UUID_RE);
-        if (m) {
-          setBundle(await api.getTripByUuid(m[1]));
-        } else {
-          const trips = await api.listTrips();
-          if (trips.length) setBundle(await api.getTrip(trips[0].id));
-        }
+        setBundle(await api.getTripByUuid(uuid));
       } catch (e) {
         setError(String(e));
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [uuid]);
 
-  // Keep the URL in sync with the loaded trip. Title edits don't change it;
-  // only slug changes do (the UUID is permanent).
+  // Keep the URL in sync with the loaded trip's slug (uuid is permanent).
+  // Preserve the current tab as a hash so links/back stay meaningful.
   useEffect(() => {
     if (!bundle) return;
-    const want = `/${bundle.trip.uuid}/${bundle.trip.slug}`;
-    if (location.pathname !== want) history.replaceState(null, "", want);
-  }, [bundle?.trip.uuid, bundle?.trip.slug]);
+    const want = `/${bundle.trip.uuid}/${bundle.trip.slug}#${tab}`;
+    if (location.pathname + location.hash !== want) history.replaceState(null, "", want);
+  }, [bundle?.trip.uuid, bundle?.trip.slug, tab]);
 
-  // Resync the title input when the trip changes (or after a save round-trip).
   useEffect(() => {
     if (bundle) setTitleDraft(bundle.trip.name);
   }, [bundle?.trip.id, bundle?.trip.name]);
 
-  // The registered roster comes from roster-db; refetch when the trip or its
-  // configured units change.
   useEffect(() => {
     if (!bundle) return;
     let cancelled = false;
@@ -101,12 +265,8 @@ export function App() {
   if (!bundle) {
     return (
       <div className="wrap">
-        <h1>Patrol Expense</h1>
-        <p className="empty">No trip yet. Load the 2026 Winter Lodge sample to get started.</p>
-        {error && <div className="err">{error}</div>}
-        <button className="btn" disabled={busy} onClick={() => run(api.seed)}>
-          {busy ? "Loading…" : "Load 2026 Winter Lodge data"}
-        </button>
+        <p><a className="back-link" href="/">← All trips</a></p>
+        <div className="err">{error ?? "Trip not found."}</div>
       </div>
     );
   }
@@ -114,6 +274,7 @@ export function App() {
   const t = bundle.trip;
   return (
     <div className="wrap">
+      <p style={{ margin: "0 0 8px" }}><a className="back-link" href="/">← All trips</a></p>
       <header className="app">
         <div style={{ flex: 1, minWidth: 220 }}>
           <input
@@ -142,9 +303,6 @@ export function App() {
             )}
           </div>
         </div>
-        <button className="btn ghost" disabled={busy} onClick={() => run(api.seed)}>
-          Reset to sample data
-        </button>
       </header>
 
       <nav className="tabs">
@@ -459,22 +617,25 @@ function Travel({ bundle, roster, run, busy }: TabProps) {
 
 // Address text input with Google Places autocomplete (proxied via the Worker).
 function AddressInput({
-  value, onChange, onPick, busy, placeholder,
+  value, onChange, onPick, onBlur, busy, placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
   onPick?: (v: string) => void;
+  onBlur?: () => void;
   busy?: boolean;
   placeholder?: string;
 }) {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
-  // Skip the first render so a prefilled value (e.g. the default "From"
-  // address) doesn't fire a Google request / open the dropdown on mount.
-  const skipRef = useRef(true);
+  // Only query after the user actually types, so a prefilled value (e.g. the
+  // default "From" address) never fires a Google request on mount. Using a ref
+  // gated on real input — rather than "skip first render" — is robust against
+  // StrictMode's double-invoked effects in dev.
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
-    if (skipRef.current) { skipRef.current = false; return; }
+    if (!dirtyRef.current) return;
     const q = value.trim();
     if (q.length < 3) { setSuggestions([]); setOpen(false); return; }
     let cancelled = false;
@@ -488,7 +649,7 @@ function AddressInput({
   }, [value]);
 
   function pick(v: string) {
-    skipRef.current = true; // don't re-query for the value we just set
+    dirtyRef.current = false; // selecting isn't "typing"; don't re-query
     setOpen(false);
     setSuggestions([]);
     onChange(v);
@@ -501,9 +662,9 @@ function AddressInput({
         value={value}
         disabled={busy}
         placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => { dirtyRef.current = true; onChange(e.target.value); }}
         onFocus={() => suggestions.length && setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={() => { setTimeout(() => setOpen(false), 150); onBlur?.(); }}
       />
       {open && suggestions.length > 0 && (
         <div className="ac-menu">
@@ -544,36 +705,47 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
   const rate = draft.rate_override ?? bundle.trip.mileage_rate;
   const reimb = Math.round((draft.round_trip_miles * rate + Number(draft.tolls)) * 100) / 100;
 
-  // Compute most-direct driving distance between two addresses via the Worker
-  // proxy, and populate round-trip miles (= one-way × 2).
-  async function calcDistance(from: string, to: string) {
-    if (!from.trim() || !to.trim()) return;
-    setCalc({ loading: true });
-    try {
-      const r = await api.geoDistance(from, to);
-      setDraft((d) => ({ ...d, round_trip_miles: r.round_trip_miles }));
-      setCalc({ loading: false, oneWay: r.one_way_miles });
-    } catch (e) {
-      setCalc({ loading: false, err: String(e) });
-    }
-  }
+  type RouteDraft = typeof draft;
+  const snapshot = (d: RouteDraft) => JSON.stringify(d);
+  const lastSaved = useRef(snapshot(draft));
 
-  function saveCalculator() {
+  // Auto-save the route's calculator fields. Persists only when something
+  // actually changed, then the worker re-materializes each driver's
+  // reimbursement into the paysheet.
+  function persistIfChanged(d: RouteDraft, oneWay?: number) {
+    const s = snapshot(d);
+    if (s === lastSaved.current) return;
+    lastSaved.current = s;
     run(() =>
       api.updateGroup(group.id, {
         name: group.name,
-        origin: draft.origin,
-        destination: draft.destination,
-        one_way_miles: calc.oneWay ?? Math.round((draft.round_trip_miles / 2) * 10) / 10,
-        round_trip_miles: Number(draft.round_trip_miles),
-        tolls: Number(draft.tolls),
+        origin: d.origin,
+        destination: d.destination,
+        one_way_miles: oneWay ?? (d.round_trip_miles ? Math.round((d.round_trip_miles / 2) * 10) / 10 : null),
+        round_trip_miles: Number(d.round_trip_miles),
+        tolls: Number(d.tolls),
         rate_override:
-          draft.rate_override == null || draft.rate_override === ("" as unknown)
-            ? null
-            : Number(draft.rate_override),
-        cost_group_id: draft.cost_group_id,
+          d.rate_override == null || d.rate_override === ("" as unknown) ? null : Number(d.rate_override),
+        cost_group_id: d.cost_group_id,
       }),
     );
+  }
+
+  // Compute most-direct driving distance via the Worker proxy, set round-trip
+  // miles (= one-way × 2), and auto-save.
+  async function calcDistance(next: RouteDraft) {
+    if (!next.origin.trim() || !next.destination.trim()) { persistIfChanged(next); return; }
+    setCalc({ loading: true });
+    try {
+      const r = await api.geoDistance(next.origin, next.destination);
+      const withMiles = { ...next, round_trip_miles: r.round_trip_miles };
+      setDraft(withMiles);
+      setCalc({ loading: false, oneWay: r.one_way_miles });
+      persistIfChanged(withMiles, r.one_way_miles);
+    } catch (e) {
+      setCalc({ loading: false, err: String(e) });
+      persistIfChanged(next); // still save the address even if distance lookup fails
+    }
   }
 
   return (
@@ -590,7 +762,8 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
             busy={busy}
             placeholder="Start address"
             onChange={(v) => setDraft((d) => ({ ...d, origin: v }))}
-            onPick={(v) => calcDistance(v, draft.destination)}
+            onPick={(v) => calcDistance({ ...draft, origin: v })}
+            onBlur={() => persistIfChanged(draft)}
           />
         </label>
         <label className="fld" style={{ flex: 1, minWidth: 180 }}>To
@@ -599,32 +772,43 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
             busy={busy}
             placeholder="Destination address"
             onChange={(v) => setDraft((d) => ({ ...d, destination: v }))}
-            onPick={(v) => calcDistance(draft.origin, v)}
+            onPick={(v) => calcDistance({ ...draft, destination: v })}
+            onBlur={() => persistIfChanged(draft)}
           />
         </label>
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <label className="fld">Round-trip mi
-          <input className="sm" value={draft.round_trip_miles} onChange={(e) => setDraft({ ...draft, round_trip_miles: Number(e.target.value) })} inputMode="decimal" />
+          <input className="sm" value={draft.round_trip_miles}
+            onChange={(e) => setDraft({ ...draft, round_trip_miles: Number(e.target.value) })}
+            onBlur={() => persistIfChanged(draft)} inputMode="decimal" />
         </label>
         <button
           className="btn ghost"
           style={{ alignSelf: "flex-end" }}
           disabled={busy || calc.loading || !draft.origin.trim() || !draft.destination.trim()}
-          onClick={() => calcDistance(draft.origin, draft.destination)}
+          onClick={() => calcDistance(draft)}
           title="Most-direct driving distance via Google Maps"
         >
           {calc.loading ? "…" : "↻ distance"}
         </button>
         <label className="fld">Tolls
-          <input className="sm" value={draft.tolls} onChange={(e) => setDraft({ ...draft, tolls: Number(e.target.value) })} inputMode="decimal" />
+          <input className="sm" value={draft.tolls}
+            onChange={(e) => setDraft({ ...draft, tolls: Number(e.target.value) })}
+            onBlur={() => persistIfChanged(draft)} inputMode="decimal" />
         </label>
         <label className="fld">Rate ($/mi)
           <input className="sm" value={draft.rate_override ?? ""} placeholder={bundle.trip.mileage_rate.toFixed(2)}
-            onChange={(e) => setDraft({ ...draft, rate_override: e.target.value === "" ? null : Number(e.target.value) })} inputMode="decimal" />
+            onChange={(e) => setDraft({ ...draft, rate_override: e.target.value === "" ? null : Number(e.target.value) })}
+            onBlur={() => persistIfChanged(draft)} inputMode="decimal" />
         </label>
         <label className="fld">Charge to
-          <select value={draft.cost_group_id ?? ""} onChange={(e) => setDraft({ ...draft, cost_group_id: e.target.value ? Number(e.target.value) : null })}>
+          <select value={draft.cost_group_id ?? ""}
+            onChange={(e) => {
+              const next = { ...draft, cost_group_id: e.target.value ? Number(e.target.value) : null };
+              setDraft(next);
+              persistIfChanged(next);
+            }}>
             {costGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </label>
@@ -632,13 +816,12 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
           <span>Per driver</span>
           <div className="v" style={{ fontSize: 18, fontWeight: 600 }}>{money(reimb)}</div>
         </div>
-        <button className="btn" style={{ alignSelf: "flex-end" }} disabled={busy} onClick={saveCalculator}>Save route</button>
       </div>
       {(calc.oneWay != null || calc.err) && (
         <p style={{ margin: "8px 0 0" }}>
           {calc.err
             ? <small className="neg">Distance lookup failed: {calc.err}</small>
-            : <small className="hint">Most direct route: {calc.oneWay} mi one-way · {draft.round_trip_miles} mi round-trip. Remember to Save route.</small>}
+            : <small className="hint">Most direct route: {calc.oneWay} mi one-way · {draft.round_trip_miles} mi round-trip · saved.</small>}
         </p>
       )}
 

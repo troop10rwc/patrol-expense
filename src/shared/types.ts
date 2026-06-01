@@ -132,3 +132,12 @@ export interface TripBundle {
   groupSummaries: GroupSummary[];
   paysheet: Paysheet;
 }
+
+/** Lightweight per-trip rollup for the index page. */
+export interface TripSummary {
+  trip: Trip;
+  totalCost: number; // sum of all expenses
+  expenseCount: number; // number of receipts entered
+  settleTotal: number; // people with a nonzero net balance
+  settleDone: number; // of those, how many are marked 'paid' (reimbursement complete)
+}
