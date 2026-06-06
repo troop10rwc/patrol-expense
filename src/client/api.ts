@@ -21,13 +21,12 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface Me {
-  id: string; // slack user id
+  email: string;
   name: string;
-  bsa_number: string | null;
 }
 
-export const loginUrl = `${BASE_PATH}/auth/login`;
-export const logoutUrl = `${BASE_PATH}/auth/logout`;
+// Cloudflare Access handles sign-in/out at the domain level.
+export const logoutUrl = "/cdn-cgi/access/logout";
 
 export const api = {
   me: () => req<Me>("/api/me"),

@@ -4,7 +4,13 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "observability": { "enabled": true },
-  "vars": { "ENVIRONMENT": "production" },
+  // Cloudflare Access (Zero Trust) protects the domain; the Worker verifies the
+  // Access JWT it injects. These identify the Access team + application.
+  "vars": {
+    "ENVIRONMENT": "production",
+    "CF_ACCESS_TEAM_DOMAIN": "troop10rwc.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "070c36323eb0321ed17203a1b6997e7489cac583535f93e933a61ba274a02c0b"
+  },
   // Serve the app as a same-origin tab at troop10rwc.org/expenses. Requires
   // troop10rwc.org to be a Cloudflare zone on this account (proxied DNS).
   // Everything else on the domain falls through to the existing site.
@@ -24,8 +30,7 @@
     {
       "binding": "DB",
       "database_name": "patrol_expense",
-      // Placeholder for local dev. Replace with the real id from `wrangler d1 create patrol_expense` before deploying.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "1da6ea31-c9cf-482c-874f-4fd5c00ea889",
       "migrations_dir": "migrations"
     },
     {

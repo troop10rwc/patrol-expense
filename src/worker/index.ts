@@ -5,7 +5,7 @@ import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, sc
 import { fetchRoster } from "./roster.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
-import { authApp, requireAuth, type AuthBindings, type SessionUser } from "./auth.ts";
+import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
 interface Bindings extends AuthBindings {
@@ -14,21 +14,22 @@ interface Bindings extends AuthBindings {
   ENVIRONMENT?: string; // "development" in dev (.dev.vars); "production" otherwise
 }
 
-type Env = { Bindings: Bindings; Variables: { user: SessionUser } };
+type Env = { Bindings: Bindings; Variables: { user: Identity } };
 type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 
-// API + auth routes (mounted at /api and /auth, with the /expenses prefix
-// stripped by the default fetch handler below).
+// API routes (mounted at /api, with the /expenses prefix stripped by the
+// default fetch handler below).
 const app = new Hono<Env>();
 const api = new Hono<Env>();
 
-// Every API route requires a signed-in, roster-linked Slack user.
+// Authentication is handled by Cloudflare Access in front of the Worker; this
+// just reads the verified identity (and is a safety net behind Access).
 api.use("*", requireAuth);
 
-// Who am I? (also the client's auth probe — 401 when signed out.)
+// Who am I? (identity from the Cloudflare Access JWT.)
 api.get("/me", (c) => {
   const u = c.get("user");
-  return c.json({ id: u.uid, name: u.name, bsa_number: u.bsa });
+  return c.json({ email: u.email, name: u.name });
 });
 
 const bad = (msg: string) => ({ error: msg });
@@ -396,13 +397,12 @@ api.post("/seed", async (c) => {
 
 api.notFound((c) => c.json(bad("not found"), 404));
 
-app.route("/auth", authApp);
 app.route("/api", api);
 
 // The app is mounted under /expenses. This handler owns the whole subpath:
-// strip the prefix, then route /api and /auth to Hono and everything else to
-// the static assets (SPA). Assets are built with Vite base "/expenses/" but
-// stored at their root paths, so the prefix must be stripped before serving.
+// strip the prefix, then route /api to Hono and everything else to the static
+// assets (SPA). Assets are built with Vite base "/expenses/" but stored at
+// their root paths, so the prefix must be stripped before serving.
 export default {
   async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -411,7 +411,7 @@ export default {
     }
     const rel = url.pathname.slice(BASE_PATH.length) || "/";
 
-    if (rel === "/api" || rel.startsWith("/api/") || rel === "/auth" || rel.startsWith("/auth/")) {
+    if (rel === "/api" || rel.startsWith("/api/")) {
       const inner = new URL(url);
       inner.pathname = rel;
       return app.fetch(new Request(inner.toString(), request), env, ctx);

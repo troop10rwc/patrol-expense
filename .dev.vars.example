@@ -1,5 +1,5 @@
 # Local dev secrets for `wrangler dev` / vite. Copy to `.dev.vars` (gitignored)
-# and fill in. For production, set each as a secret: `wrangler secret put NAME`.
+# and fill in. For production, set secrets via `wrangler secret put NAME`.
 
 # --- Google Maps (server-side, src/worker/geo.ts) ---
 #   - Places API (New)   — address autocomplete
@@ -8,19 +8,12 @@
 # (the Worker calls server-to-server, so HTTP-referrer restriction would block it).
 GOOGLE_MAPS_API_KEY=your-google-maps-api-key
 
-# --- Slack "Sign in with Slack" (src/worker/auth.ts) ---
-# From the troop's Slack app → Basic Information.
-# Add redirect URLs to the Slack app:
-#   https://troop10rwc.org/expenses/auth/callback   (prod)
-#   http://localhost:5173/expenses/auth/callback     (dev, if Slack allows http)
-# Enable user scopes: openid, profile, email.
-SLACK_CLIENT_ID=your-slack-client-id
-SLACK_CLIENT_SECRET=your-slack-client-secret
-# A long random string used to sign session cookies (e.g. `openssl rand -hex 32`).
-SESSION_SECRET=replace-with-a-long-random-string
-# Optional: restrict sign-in to one Slack workspace (team id, e.g. T01234567).
-# SLACK_TEAM_ID=
-
-# DEV ONLY: skip Slack and treat every request as a fixed dev user.
-# NEVER set this in production.
+# --- Auth ---
+# Production authentication is handled by Cloudflare Access (Zero Trust) in front
+# of troop10rwc.org; the Worker verifies the Access JWT (CF_ACCESS_TEAM_DOMAIN /
+# CF_ACCESS_AUD are set in wrangler.jsonc vars). There is no Access locally, so:
+# DEV ONLY — treat every request as a fixed dev user. NEVER set in production.
 DEV_AUTH_BYPASS=1
+
+# Tells the Worker to serve assets the Vite-dev way (prefixed paths).
+ENVIRONMENT=development

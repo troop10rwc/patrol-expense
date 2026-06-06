@@ -9,7 +9,7 @@ import type {
   RosterMember,
   PersonType,
 } from "../shared/types.ts";
-import { api, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
+import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
 type Tab = "patrols" | "travel" | "expenses" | "reimbursement" | "settings";
@@ -30,7 +30,9 @@ function appPath(): string {
   return (p.startsWith(BASE_PATH) ? p.slice(BASE_PATH.length) : p) || "/";
 }
 
-// Auth gate: every page requires a signed-in, roster-linked Slack user.
+// Authentication is handled by Cloudflare Access (Slack SSO) in front of the
+// app, so a request that reaches us is already signed in. We just read the
+// identity; the rare 401 means Access didn't pass a valid token.
 export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined=loading
   useEffect(() => {
@@ -40,7 +42,7 @@ export function App() {
   }, []);
 
   if (me === undefined) return <div className="wrap">Loading…</div>;
-  if (me === null) return <SignIn />;
+  if (me === null) return <NoAccess />;
 
   const m = appPath().slice(1).match(UUID_RE);
   return (
@@ -51,15 +53,12 @@ export function App() {
   );
 }
 
-function SignIn() {
+function NoAccess() {
   return (
     <div className="wrap signin">
       <h1>Troop 10 Expenses</h1>
-      <p className="empty">Sign in with your Troop 10 Slack account to view and manage trip expenses.</p>
-      <a className="btn slack-btn" href={loginUrl}>
-        <span aria-hidden>＃</span> Sign in with Slack
-      </a>
-      <p><small className="hint">Access is limited to troop members linked in the roster.</small></p>
+      <p className="empty">We couldn't read your sign-in. Reload the page, or sign in again.</p>
+      <a className="btn" href={logoutUrl}>Sign in again</a>
     </div>
   );
 }
