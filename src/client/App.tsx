@@ -616,63 +616,25 @@ function accounting(n: number): string {
   return n < 0 ? `(${s})` : s;
 }
 
-// Net outstanding in plain words. outstanding > 0 => the troop owes the person
-// (a reimbursement is due); < 0 => the person owes the troop.
-function describeNet(o: number): string {
-  if (o > 0.005) return `owed ${money(o)}`;
-  if (o < -0.005) return `owes ${money(-o)}`;
-  return "settled";
-}
+// CSV of a snapshot's reimbursement summary (its frozen paysheet). Money is
+// written as raw signed numbers (spreadsheet-friendly). When a previous snapshot
+// is supplied, a "Net change vs prev" column gives each person's net movement.
+function buildSummaryCsv(b: TripBundle, prev?: TripBundle | null): string {
+  const prevNet = prev ? netFromBundle(prev) : null;
+  const header = ["Adult", "Code", "Paid", "Owes (share)", "Pre-reimbursed", "Net"];
+  if (prevNet) header.push("Net change vs prev");
+  header.push("Settlement");
 
-// Build a CSV "diff" of everything that moved since the latest snapshot. The
-// Reimbursement rows lead with each person's net change (outstanding) and a
-// "Direction" note saying whether they now owe more / less or are owed more /
-// less. Money values are raw numbers (spreadsheet-friendly).
-function buildChangesCsv(diff: BundleDiff, nameOf: (id: number) => string, netOf?: (id: number) => number | undefined): string {
-  const rows: unknown[][] = [["Category", "Item", "Field", "From", "To", "Delta", "Direction"]];
-  const delta = (c: FieldChange) =>
-    typeof c.from === "number" && typeof c.to === "number" ? round2(c.to - c.from) : "";
-
-  // Reimbursement deltas first — the bottom line for who owes / is owed.
-  for (const r of diff.paysheet.rows) {
-    if (r.added) { rows.push(["Reimbursement", r.name, "added", "", "", "", "added to paysheet"]); continue; }
-    if (r.removed) { rows.push(["Reimbursement", r.name, "removed", "", "", "", "removed from paysheet"]); continue; }
-    const out = r.changes.find((c) => c.field === "outstanding");
-    if (out && typeof out.from === "number" && typeof out.to === "number") {
-      const d = round2(out.to - out.from);
-      // outstanding up => owed more / owes less; down => owes more / owed less.
-      const dir =
-        d > 0.005 ? (out.to >= 0 ? `owed ${money(d)} more` : `owes ${money(d)} less`) :
-        d < -0.005 ? (out.to > 0 ? `owed ${money(-d)} less` : `owes ${money(-d)} more`) :
-        "no net change";
-      rows.push(["Reimbursement", r.name, "net", out.from, out.to, d, `${describeNet(out.from)} → ${describeNet(out.to)} (${dir})`]);
+  const rows: unknown[][] = [header];
+  for (const r of b.paysheet.rows) {
+    if (!(r.paid || r.owed || r.prepay)) continue;
+    const cells: unknown[] = [r.name, r.code ?? "", round2(r.paid), round2(r.owed), round2(r.prepay), round2(r.outstanding)];
+    if (prevNet) {
+      const pv = prevNet(r.person_id);
+      cells.push(pv != null ? round2(r.outstanding - pv) : "");
     }
-    const st = r.changes.find((c) => c.field === "status");
-    if (st) {
-      const net = (st.to === "paid" || st.to === "received") ? netOf?.(r.person_id) : undefined;
-      const note = net != null ? `${st.to} ${money(Math.abs(net))}` : "settlement status";
-      rows.push(["Reimbursement", r.name, "status", st.from, st.to, net != null ? round2(Math.abs(net)) : "", note]);
-    }
-  }
-
-  for (const e of diff.expenses.added) rows.push(["Expense added", e.description, "amount", "", e.amount, e.amount, `paid by ${nameOf(e.payer_id)}`]);
-  for (const e of diff.expenses.removed) rows.push(["Expense removed", e.description, "amount", e.amount, "", -e.amount, ""]);
-  for (const e of diff.expenses.changed)
-    for (const c of e.changes) rows.push(["Expense changed", e.description, c.field, c.from, c.to, delta(c), ""]);
-
-  for (const p of diff.prepayments.added) rows.push(["Pre-reimbursement added", nameOf(p.person_id), "amount", "", p.amount, p.amount, ""]);
-  for (const p of diff.prepayments.removed) rows.push(["Pre-reimbursement removed", nameOf(p.person_id), "amount", p.amount, "", -p.amount, ""]);
-
-  for (const p of diff.people.added) rows.push(["Person added", p.name, "", "", "", "", ""]);
-  for (const p of diff.people.removed) rows.push(["Person removed", p.name, "", "", "", "", ""]);
-
-  if (diff.paysheet.totalExpenses) {
-    const c = diff.paysheet.totalExpenses;
-    rows.push(["Total", "", "totalExpenses", c.from, c.to, delta(c), ""]);
-  }
-  if (diff.paysheet.totalPrepaid) {
-    const c = diff.paysheet.totalPrepaid;
-    rows.push(["Total", "", "totalPrepaid", c.from, c.to, delta(c), ""]);
+    cells.push(r.status);
+    rows.push(cells);
   }
   return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
 }
@@ -699,16 +661,6 @@ function nameFromBundle(b: TripBundle): (id: number) => string {
 function netFromBundle(b: TripBundle): (id: number) => number | undefined {
   const m = new Map(b.paysheet.rows.map((r) => [r.person_id, r.outstanding] as const));
   return (id) => m.get(id);
-}
-
-/** An empty bundle (same trip), so diffing the first snapshot against it
- * surfaces its whole contents as a baseline rather than an empty diff. */
-function emptyBundle(b: TripBundle): TripBundle {
-  return {
-    ...b,
-    people: [], groups: [], expenses: [], members: [], prepayments: [], travelDrivers: [],
-    groupSummaries: [], paysheet: { rows: [], totalExpenses: 0, totalPrepaid: 0 },
-  };
 }
 
 /** Itemized human-readable list of a diff.
@@ -829,18 +781,16 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
     }
   }
 
-  // Download a CSV of the changes captured in a snapshot (its diff vs the
-  // previous snapshot) — matching the inline "changes captured" view. The first
-  // snapshot is diffed against an empty bundle so it exports its full contents.
-  async function downloadSnapshotCsv(s: SnapshotMeta) {
+  // Download a CSV of the snapshot's reimbursement summary (its frozen
+  // paysheet), with each person's net change vs the previous snapshot.
+  async function downloadSummaryCsv(s: SnapshotMeta) {
     setErr(null);
     try {
       const snap = await api.getSnapshot(s.id);
       const idx = snapshots.findIndex((x) => x.id === s.id);
       const prevMeta = idx >= 0 ? snapshots[idx + 1] : undefined;
-      const prevBundle = prevMeta ? (await api.getSnapshot(prevMeta.id)).bundle : emptyBundle(snap.bundle);
-      const d = diffBundles(prevBundle, snap.bundle);
-      downloadCsv(`changes-in-snapshot-${s.id}-${bundle.trip.slug}.csv`, buildChangesCsv(d, nameFromBundle(snap.bundle), netFromBundle(snap.bundle)));
+      const prev = prevMeta ? (await api.getSnapshot(prevMeta.id)).bundle : null;
+      downloadCsv(`reimbursement-summary-snapshot-${s.id}-${bundle.trip.slug}.csv`, buildSummaryCsv(snap.bundle, prev));
     } catch (e) {
       setErr(String(e));
     }
@@ -902,7 +852,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                     <td className="num">{money(s.totalExpenses)}</td>
                     <td className="num">{money(s.outstanding)}</td>
                     <td className="num snapshot-actions">
-                      <a href="#" title="Download the changes captured in this snapshot as CSV" onClick={(e) => { e.preventDefault(); downloadSnapshotCsv(s); }}>⬇ CSV</a>
+                      <a href="#" title="Download this snapshot's reimbursement summary as CSV" onClick={(e) => { e.preventDefault(); downloadSummaryCsv(s); }}>⬇ CSV</a>
                       <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
                     </td>
                   </tr>
