@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type {
   TripBundle,
   TripSummary,
@@ -606,37 +606,61 @@ function csvCell(v: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// Build a CSV "diff" of everything that moved since the latest snapshot.
-// Money values are written as raw numbers (spreadsheet-friendly), with a signed
-// Delta column where both sides are numeric.
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Net outstanding in plain words. outstanding > 0 => the troop owes the person
+// (a reimbursement is due); < 0 => the person owes the troop.
+function describeNet(o: number): string {
+  if (o > 0.005) return `owed ${money(o)}`;
+  if (o < -0.005) return `owes ${money(-o)}`;
+  return "settled";
+}
+
+// Build a CSV "diff" of everything that moved since the latest snapshot. The
+// Reimbursement rows lead with each person's net change (outstanding) and a
+// "Direction" note saying whether they now owe more / less or are owed more /
+// less. Money values are raw numbers (spreadsheet-friendly).
 function buildChangesCsv(diff: BundleDiff, nameOf: (id: number) => string): string {
-  const rows: unknown[][] = [["Category", "Item", "Field", "From", "To", "Delta"]];
+  const rows: unknown[][] = [["Category", "Item", "Field", "From", "To", "Delta", "Direction"]];
   const delta = (c: FieldChange) =>
-    typeof c.from === "number" && typeof c.to === "number" ? Math.round((c.to - c.from) * 100) / 100 : "";
+    typeof c.from === "number" && typeof c.to === "number" ? round2(c.to - c.from) : "";
 
-  for (const e of diff.expenses.added) rows.push(["Expense added", e.description, "amount", "", e.amount, e.amount]);
-  for (const e of diff.expenses.removed) rows.push(["Expense removed", e.description, "amount", e.amount, "", -e.amount]);
-  for (const e of diff.expenses.changed)
-    for (const c of e.changes) rows.push(["Expense changed", e.description, c.field, c.from, c.to, delta(c)]);
-
-  for (const p of diff.prepayments.added) rows.push(["Pre-reimbursement added", nameOf(p.person_id), "amount", "", p.amount, p.amount]);
-  for (const p of diff.prepayments.removed) rows.push(["Pre-reimbursement removed", nameOf(p.person_id), "amount", p.amount, "", -p.amount]);
-
-  for (const p of diff.people.added) rows.push(["Person added", p.name, "", "", "", ""]);
-  for (const p of diff.people.removed) rows.push(["Person removed", p.name, "", "", "", ""]);
-
+  // Reimbursement deltas first — the bottom line for who owes / is owed.
   for (const r of diff.paysheet.rows) {
-    if (r.added) { rows.push(["Paysheet added", r.name, "", "", "", ""]); continue; }
-    if (r.removed) { rows.push(["Paysheet removed", r.name, "", "", "", ""]); continue; }
-    for (const c of r.changes) rows.push(["Paysheet", r.name, c.field, c.from, c.to, delta(c)]);
+    if (r.added) { rows.push(["Reimbursement", r.name, "added", "", "", "", "added to paysheet"]); continue; }
+    if (r.removed) { rows.push(["Reimbursement", r.name, "removed", "", "", "", "removed from paysheet"]); continue; }
+    const out = r.changes.find((c) => c.field === "outstanding");
+    if (out && typeof out.from === "number" && typeof out.to === "number") {
+      const d = round2(out.to - out.from);
+      // outstanding up => owed more / owes less; down => owes more / owed less.
+      const dir =
+        d > 0.005 ? (out.to >= 0 ? `owed ${money(d)} more` : `owes ${money(d)} less`) :
+        d < -0.005 ? (out.to > 0 ? `owed ${money(-d)} less` : `owes ${money(-d)} more`) :
+        "no net change";
+      rows.push(["Reimbursement", r.name, "net", out.from, out.to, d, `${describeNet(out.from)} → ${describeNet(out.to)} (${dir})`]);
+    }
+    const st = r.changes.find((c) => c.field === "status");
+    if (st) rows.push(["Reimbursement", r.name, "status", st.from, st.to, "", "settlement status"]);
   }
+
+  for (const e of diff.expenses.added) rows.push(["Expense added", e.description, "amount", "", e.amount, e.amount, `paid by ${nameOf(e.payer_id)}`]);
+  for (const e of diff.expenses.removed) rows.push(["Expense removed", e.description, "amount", e.amount, "", -e.amount, ""]);
+  for (const e of diff.expenses.changed)
+    for (const c of e.changes) rows.push(["Expense changed", e.description, c.field, c.from, c.to, delta(c), ""]);
+
+  for (const p of diff.prepayments.added) rows.push(["Pre-reimbursement added", nameOf(p.person_id), "amount", "", p.amount, p.amount, ""]);
+  for (const p of diff.prepayments.removed) rows.push(["Pre-reimbursement removed", nameOf(p.person_id), "amount", p.amount, "", -p.amount, ""]);
+
+  for (const p of diff.people.added) rows.push(["Person added", p.name, "", "", "", "", ""]);
+  for (const p of diff.people.removed) rows.push(["Person removed", p.name, "", "", "", "", ""]);
+
   if (diff.paysheet.totalExpenses) {
     const c = diff.paysheet.totalExpenses;
-    rows.push(["Total", "", "totalExpenses", c.from, c.to, delta(c)]);
+    rows.push(["Total", "", "totalExpenses", c.from, c.to, delta(c), ""]);
   }
   if (diff.paysheet.totalPrepaid) {
     const c = diff.paysheet.totalPrepaid;
-    rows.push(["Total", "", "totalPrepaid", c.from, c.to, delta(c)]);
+    rows.push(["Total", "", "totalPrepaid", c.from, c.to, delta(c), ""]);
   }
   return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
 }
@@ -699,6 +723,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
 
   async function open(sid: number) {
     setErr(null);
+    if (viewing?.id === sid) { setViewing(null); return; } // toggle closed
     try {
       setViewing(await api.getSnapshot(sid));
     } catch (e) {
@@ -786,60 +811,60 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
         </div>
       )}
 
-      {/* History */}
+      {/* History — clicking a row expands its frozen paysheet inline below it. */}
       {snapshots.length > 0 && (
         <table>
           <thead>
             <tr><th>Taken</th><th>Label</th><th>By</th><th className="num">Total</th><th className="num">Outstanding</th><th></th></tr>
           </thead>
           <tbody>
-            {snapshots.map((s) => (
-              <tr key={s.id}>
-                <td><a href="#" onClick={(e) => { e.preventDefault(); open(s.id); }}>{fmtTime(s.created_at)}</a></td>
-                <td>{s.label || <span className="hint">—</span>}</td>
-                <td>{s.created_by || <span className="hint">—</span>}</td>
-                <td className="num">{money(s.totalExpenses)}</td>
-                <td className="num">{money(s.outstanding)}</td>
-                <td className="num"><button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button></td>
-              </tr>
-            ))}
+            {snapshots.map((s) => {
+              const isOpen = viewing?.id === s.id;
+              return (
+                <Fragment key={s.id}>
+                  <tr className={isOpen ? "snapshot-open" : ""}>
+                    <td><a href="#" onClick={(e) => { e.preventDefault(); open(s.id); }}>{isOpen ? "▾ " : "▸ "}{fmtTime(s.created_at)}</a></td>
+                    <td>{s.label || <span className="hint">—</span>}</td>
+                    <td>{s.created_by || <span className="hint">—</span>}</td>
+                    <td className="num">{money(s.totalExpenses)}</td>
+                    <td className="num">{money(s.outstanding)}</td>
+                    <td className="num"><button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button></td>
+                  </tr>
+                  {isOpen && viewing && (
+                    <tr className="snapshot-detail">
+                      <td colSpan={6}>
+                        <table>
+                          <thead>
+                            <tr><th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th><th className="num">Pre-reimbursed</th><th className="num">Net</th><th>Settlement</th></tr>
+                          </thead>
+                          <tbody>
+                            {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
+                              const o = r.outstanding;
+                              const lbl = o > 0.005 ? <span className="pos">owed {money(o)}</span>
+                                : o < -0.005 ? <span className="neg">owes {money(-o)}</span>
+                                : <span className="settled">—</span>;
+                              return (
+                                <tr key={r.person_id}>
+                                  <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
+                                  <td className="num">{r.paid ? money(r.paid) : ""}</td>
+                                  <td className="num">{r.owed ? money(r.owed) : ""}</td>
+                                  <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
+                                  <td className="num">{lbl}</td>
+                                  <td>{r.status}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}.</small></p>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
-      )}
-
-      {/* Read-only viewer for a past snapshot */}
-      {viewing && (
-        <div style={{ marginTop: 12 }}>
-          <div className="toolbar">
-            <h3 style={{ margin: 0 }}>Snapshot — {fmtTime(viewing.created_at)}{viewing.label ? ` · ${viewing.label}` : ""}</h3>
-            <div className="spacer" />
-            <button className="btn" onClick={() => setViewing(null)}>Close</button>
-          </div>
-          <table>
-            <thead>
-              <tr><th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th><th className="num">Pre-reimbursed</th><th className="num">Net</th><th>Settlement</th></tr>
-            </thead>
-            <tbody>
-              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
-                const o = r.outstanding;
-                const lbl = o > 0.005 ? <span className="pos">owed {money(o)}</span>
-                  : o < -0.005 ? <span className="neg">owes {money(-o)}</span>
-                  : <span className="settled">—</span>;
-                return (
-                  <tr key={r.person_id}>
-                    <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
-                    <td className="num">{r.paid ? money(r.paid) : ""}</td>
-                    <td className="num">{r.owed ? money(r.owed) : ""}</td>
-                    <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
-                    <td className="num">{lbl}</td>
-                    <td>{r.status}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <p><small className="hint">Read-only — this is the frozen state as of {fmtTime(viewing.created_at)}.</small></p>
-        </div>
       )}
     </div>
   );
