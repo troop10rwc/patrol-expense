@@ -558,10 +558,12 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                       run(() => api.setStatus(bundle.trip.id, r.person_id, e.target.value as SettlementStatus))
                     }
                   >
+                    {/* Direction-appropriate terminal state: the troop pays a
+                        person it owes; it receives from a person who owes it. */}
                     <option value="none">—</option>
                     <option value="requested">requested</option>
-                    <option value="received">received</option>
-                    <option value="paid">paid</option>
+                    {(o > 0.005 || r.status === "paid") && <option value="paid">paid</option>}
+                    {(o < -0.005 || r.status === "received") && <option value="received">received</option>}
                   </select>
                   {note("status")}
                 </td>
@@ -626,7 +628,7 @@ function describeNet(o: number): string {
 // Reimbursement rows lead with each person's net change (outstanding) and a
 // "Direction" note saying whether they now owe more / less or are owed more /
 // less. Money values are raw numbers (spreadsheet-friendly).
-function buildChangesCsv(diff: BundleDiff, nameOf: (id: number) => string): string {
+function buildChangesCsv(diff: BundleDiff, nameOf: (id: number) => string, netOf?: (id: number) => number | undefined): string {
   const rows: unknown[][] = [["Category", "Item", "Field", "From", "To", "Delta", "Direction"]];
   const delta = (c: FieldChange) =>
     typeof c.from === "number" && typeof c.to === "number" ? round2(c.to - c.from) : "";
@@ -646,7 +648,11 @@ function buildChangesCsv(diff: BundleDiff, nameOf: (id: number) => string): stri
       rows.push(["Reimbursement", r.name, "net", out.from, out.to, d, `${describeNet(out.from)} → ${describeNet(out.to)} (${dir})`]);
     }
     const st = r.changes.find((c) => c.field === "status");
-    if (st) rows.push(["Reimbursement", r.name, "status", st.from, st.to, "", "settlement status"]);
+    if (st) {
+      const net = (st.to === "paid" || st.to === "received") ? netOf?.(r.person_id) : undefined;
+      const note = net != null ? `${st.to} ${money(Math.abs(net))}` : "settlement status";
+      rows.push(["Reimbursement", r.name, "status", st.from, st.to, net != null ? round2(Math.abs(net)) : "", note]);
+    }
   }
 
   for (const e of diff.expenses.added) rows.push(["Expense added", e.description, "amount", "", e.amount, e.amount, `paid by ${nameOf(e.payer_id)}`]);
@@ -689,12 +695,25 @@ function nameFromBundle(b: TripBundle): (id: number) => string {
   return (id) => m.get(id) ?? `#${id}`;
 }
 
+/** Resolve a person id to their net (outstanding) in a specific bundle. */
+function netFromBundle(b: TripBundle): (id: number) => number | undefined {
+  const m = new Map(b.paysheet.rows.map((r) => [r.person_id, r.outstanding] as const));
+  return (id) => m.get(id);
+}
+
 /** Itemized human-readable list of a diff.
  * mode "full"   — every change, including each person's recomputed paysheet row.
  * mode "inputs" — only the edits that were actually made (expenses, prepayments,
  *   people, settlement status) plus totals; the derived per-person share/net
  *   recalculations are left out (those show up in the summary table's ± column). */
-function DiffList({ diff, nameOf, mode = "full" }: { diff: BundleDiff; nameOf: (id: number) => string; mode?: "full" | "inputs" }) {
+function DiffList({ diff, nameOf, netOf, mode = "full" }: { diff: BundleDiff; nameOf: (id: number) => string; netOf?: (id: number) => number | undefined; mode?: "full" | "inputs" }) {
+  // " — paid $208.50" / " — received $30.00" for a settlement that reached a
+  // terminal state, using the person's net at the "to" side of the diff.
+  const settleAmt = (r: BundleDiff["paysheet"]["rows"][number], st?: FieldChange) => {
+    if (!st || (st.to !== "paid" && st.to !== "received")) return "";
+    const net = netOf?.(r.person_id);
+    return net == null ? "" : ` — ${st.to === "paid" ? "paid" : "received"} ${money(Math.abs(net))}`;
+  };
   return (
     <ul className="diff">
       {diff.expenses.added.map((e) => (
@@ -723,11 +742,11 @@ function DiffList({ diff, nameOf, mode = "full" }: { diff: BundleDiff; nameOf: (
         .map((r) => {
           if (r.added) return <li key={`ps${r.person_id}`} className="pos">+ {r.name} added to paysheet</li>;
           if (r.removed) return <li key={`ps${r.person_id}`} className="neg">− {r.name} removed from paysheet</li>;
+          const st = r.changes.find((c) => c.field === "status");
           if (mode === "inputs") {
-            const st = r.changes.find((c) => c.field === "status");
-            return <li key={`ps${r.person_id}`}>{r.name}: {st ? fmtChange(st) : ""}</li>;
+            return <li key={`ps${r.person_id}`}>{r.name}: {st ? fmtChange(st) : ""}{settleAmt(r, st)}</li>;
           }
-          return <li key={`ps${r.person_id}`}>{r.name}: {r.changes.map(fmtChange).join(", ")}</li>;
+          return <li key={`ps${r.person_id}`}>{r.name}: {r.changes.map(fmtChange).join(", ")}{settleAmt(r, st)}</li>;
         })}
       {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
       {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
@@ -806,7 +825,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
     try {
       const snap = await api.getSnapshot(s.id);
       const d = diffBundles(snap.bundle, bundle);
-      downloadCsv(`changes-${bundle.trip.slug}-since-snapshot-${s.id}.csv`, buildChangesCsv(d, payerName));
+      downloadCsv(`changes-${bundle.trip.slug}-since-snapshot-${s.id}.csv`, buildChangesCsv(d, payerName, netFromBundle(bundle)));
     } catch (e) {
       setErr(String(e));
     }
@@ -845,7 +864,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
       {changes?.since && diff?.hasChanges && (
         <div style={{ marginBottom: 8 }}>
           <h3 style={{ marginBottom: 6 }}>Changes since {fmtTime(changes.since.created_at)}</h3>
-          <DiffList diff={diff} nameOf={payerName} />
+          <DiffList diff={diff} nameOf={payerName} netOf={netFromBundle(bundle)} />
         </div>
       )}
 
@@ -887,7 +906,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                           {!hasPrev ? (
                             <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
                           ) : viewingDiff?.diff?.hasChanges ? (
-                            <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} mode="inputs" />
+                            <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} netOf={netFromBundle(viewing.bundle)} mode="inputs" />
                           ) : (
                             <p className="hint">No changes from the previous snapshot.</p>
                           )}
