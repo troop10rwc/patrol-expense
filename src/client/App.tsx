@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import type {
   TripBundle,
   TripSummary,
@@ -8,7 +8,10 @@ import type {
   SettlementStatus,
   RosterMember,
   PersonType,
+  SnapshotMeta,
+  Snapshot,
 } from "../shared/types.ts";
+import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -452,16 +455,50 @@ function useMaps(bundle: TripBundle) {
 }
 
 // ------------------------------------------------------------------ Reimbursement
+// Per-person changes since the latest snapshot: person_id -> { added, field->change }.
+interface RowChange { added: boolean; fields: Map<string, FieldChange> }
+
 function Reimbursement({ bundle, run, busy }: TabProps) {
+  const tripId = bundle.trip.id;
   const [showAll, setShowAll] = useState(false);
+  const [changes, setChanges] = useState<{ since: SnapshotMeta | null; diff: BundleDiff | null } | null>(null);
+  const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([]);
+
+  // Refresh the diff + snapshot list (call after taking/deleting a snapshot).
+  const reload = useCallback(async () => {
+    const [ch, list] = await Promise.all([api.getChanges(tripId), api.listSnapshots(tripId)]);
+    setChanges(ch);
+    setSnapshots(list);
+  }, [tripId]);
+
+  // Re-derive whenever the live bundle changes (the parent hands a new bundle
+  // object after every edit), so highlights always reflect the current state.
+  useEffect(() => {
+    let cancelled = false;
+    api.getChanges(tripId).then((c) => { if (!cancelled) setChanges(c); }).catch(() => {});
+    api.listSnapshots(tripId).then((s) => { if (!cancelled) setSnapshots(s); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [bundle, tripId]);
+
+  const changeByPerson = useMemo(() => {
+    const m = new Map<number, RowChange>();
+    for (const r of changes?.diff?.paysheet.rows ?? []) {
+      m.set(r.person_id, { added: !!r.added, fields: new Map(r.changes.map((c) => [c.field, c])) });
+    }
+    return m;
+  }, [changes]);
+
   const rows = bundle.paysheet.rows
     .filter((r) => showAll || r.paid || r.owed || r.prepay)
     .sort((a, b) => a.outstanding - b.outstanding);
 
   const owedToPeople = rows.filter((r) => r.outstanding > 0.005).reduce((s, r) => s + r.outstanding, 0);
   const owedByPeople = rows.filter((r) => r.outstanding < -0.005).reduce((s, r) => s - r.outstanding, 0);
+  const since = changes?.since ?? null;
 
   return (
+    <>
+    <Snapshots bundle={bundle} changes={changes} snapshots={snapshots} reload={reload} />
     <div className="card">
       <div className="kpi" style={{ marginBottom: 18 }}>
         <div><div className="k">Total expenses</div><div className="v">{money(bundle.paysheet.totalExpenses)}</div></div>
@@ -497,14 +534,22 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
               o > 0.005 ? <span className="pos">owed {money(o)}</span> :
               o < -0.005 ? <span className="neg">owes {money(-o)}</span> :
               <span className="settled">—</span>;
+            // Call out cells whose value moved since the last snapshot: keep the
+            // highlight, and show the explicit before → after underneath.
+            const rc = changeByPerson.get(r.person_id);
+            const cls = (f: string, base = "num") => rc?.fields.has(f) ? `${base} changed` : base;
+            const note = (f: string) => {
+              const c = rc?.fields.get(f);
+              return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
+            };
             return (
-              <tr key={r.person_id} className={!r.paid && !r.owed && !r.prepay ? "zero" : ""}>
-                <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
-                <td className="num">{r.paid ? money(r.paid) : ""}</td>
-                <td className="num">{r.owed ? money(r.owed) : ""}</td>
-                <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
-                <td className="num">{label}</td>
-                <td>
+              <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
+                <td>{r.name} {r.code && <span className="hint">({r.code})</span>}{rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}</td>
+                <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
+                <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
+                <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
+                <td className={cls("outstanding")}>{label}</td>
+                <td className={rc?.fields.has("status") ? "changed" : ""}>
                   <select
                     className={`status-${r.status}`}
                     value={r.status}
@@ -513,11 +558,14 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                       run(() => api.setStatus(bundle.trip.id, r.person_id, e.target.value as SettlementStatus))
                     }
                   >
+                    {/* Direction-appropriate terminal state: the troop pays a
+                        person it owes; it receives from a person who owes it. */}
                     <option value="none">—</option>
                     <option value="requested">requested</option>
-                    <option value="received">received</option>
-                    <option value="paid">paid</option>
+                    {(o > 0.005 || r.status === "paid") && <option value="paid">paid</option>}
+                    {(o < -0.005 || r.status === "received") && <option value="received">received</option>}
                   </select>
+                  {note("status")}
                 </td>
               </tr>
             );
@@ -530,7 +578,351 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
       <p><small className="hint">
         Net = what they paid − their share of expenses − pre-reimbursements.
         Green means the troop owes them; red means they owe the troop.
+        {since && changes?.diff?.hasChanges && <> <span className="changed-key">Highlighted</span> cells show <em>before → after</em> for changes since the snapshot taken {fmtTime(since.created_at)}.</>}
       </small></p>
+    </div>
+    </>
+  );
+}
+
+// ------------------------------------------------------------------ Snapshots
+const MONEY_FIELDS = new Set([
+  "amount", "paid", "owed", "prepay", "balance", "outstanding", "totalExpenses", "totalPrepaid",
+]);
+function fmtVal(field: string, v: unknown): string {
+  if (typeof v === "number" && MONEY_FIELDS.has(field)) return money(v);
+  if (v == null || v === "") return "—";
+  return String(v);
+}
+function fmtChange(ch: FieldChange): string {
+  return `${ch.field}: ${fmtVal(ch.field, ch.from)} → ${fmtVal(ch.field, ch.to)}`;
+}
+function fmtTime(s: string): string {
+  // SQLite datetime('now') is "YYYY-MM-DD HH:MM:SS" in UTC.
+  const d = new Date(s.replace(" ", "T") + "Z");
+  return isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
+function csvCell(v: unknown): string {
+  const s = v == null ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Accounting-style money: negatives in parentheses, e.g. -208.5 -> "($208.50)".
+function accounting(n: number): string {
+  const s = `$${Math.abs(n).toFixed(2)}`;
+  return n < 0 ? `(${s})` : s;
+}
+
+// CSV of a snapshot's reimbursement summary (its frozen paysheet). Money is
+// written as raw signed numbers (spreadsheet-friendly). When a previous snapshot
+// is supplied, a "Net change vs prev" column gives each person's net movement.
+function buildSummaryCsv(b: TripBundle, prev?: TripBundle | null): string {
+  const prevNet = prev ? netFromBundle(prev) : null;
+  const header = ["Adult", "Code", "Paid", "Owes (share)", "Pre-reimbursed", "Net"];
+  if (prevNet) header.push("Net change vs prev");
+  header.push("Settlement");
+
+  const rows: unknown[][] = [header];
+  for (const r of b.paysheet.rows) {
+    if (!(r.paid || r.owed || r.prepay)) continue;
+    const cells: unknown[] = [r.name, r.code ?? "", round2(r.paid), round2(r.owed), round2(r.prepay), round2(r.outstanding)];
+    if (prevNet) {
+      const pv = prevNet(r.person_id);
+      cells.push(pv != null ? round2(r.outstanding - pv) : "");
+    }
+    cells.push(r.status);
+    rows.push(cells);
+  }
+  return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+}
+
+function downloadCsv(filename: string, csv: string): void {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Resolve a person id to a name using a specific bundle's people. */
+function nameFromBundle(b: TripBundle): (id: number) => string {
+  const m = new Map(b.people.map((p) => [p.id, p.name] as const));
+  return (id) => m.get(id) ?? `#${id}`;
+}
+
+/** Resolve a person id to their net (outstanding) in a specific bundle. */
+function netFromBundle(b: TripBundle): (id: number) => number | undefined {
+  const m = new Map(b.paysheet.rows.map((r) => [r.person_id, r.outstanding] as const));
+  return (id) => m.get(id);
+}
+
+/** Itemized human-readable list of a diff.
+ * mode "full"   — every change, including each person's recomputed paysheet row.
+ * mode "inputs" — only the edits that were actually made (expenses, prepayments,
+ *   people, settlement status) plus totals; the derived per-person share/net
+ *   recalculations are left out (those show up in the summary table's ± column). */
+function DiffList({ diff, nameOf, netOf, mode = "full" }: { diff: BundleDiff; nameOf: (id: number) => string; netOf?: (id: number) => number | undefined; mode?: "full" | "inputs" }) {
+  // " — paid $208.50" / " — received $30.00" for a settlement that reached a
+  // terminal state, using the person's net at the "to" side of the diff.
+  const settleAmt = (r: BundleDiff["paysheet"]["rows"][number], st?: FieldChange) => {
+    if (!st || (st.to !== "paid" && st.to !== "received")) return "";
+    const net = netOf?.(r.person_id);
+    return net == null ? "" : ` — ${st.to === "paid" ? "paid" : "received"} ${money(Math.abs(net))}`;
+  };
+  return (
+    <ul className="diff">
+      {diff.expenses.added.map((e) => (
+        <li key={`ea${e.id}`} className="pos">+ Expense “{e.description}” {money(e.amount)} (paid by {nameOf(e.payer_id)})</li>
+      ))}
+      {diff.expenses.removed.map((e) => (
+        <li key={`er${e.id}`} className="neg">− Expense “{e.description}” {money(e.amount)}</li>
+      ))}
+      {diff.expenses.changed.map((e) => (
+        <li key={`ec${e.id}`}>✎ Expense “{e.description}” — {e.changes.map(fmtChange).join(", ")}</li>
+      ))}
+      {diff.prepayments.added.map((p) => (
+        <li key={`pa${p.id}`} className="pos">+ Pre-reimbursement {money(p.amount)} to {nameOf(p.person_id)}</li>
+      ))}
+      {diff.prepayments.removed.map((p) => (
+        <li key={`pr${p.id}`} className="neg">− Pre-reimbursement {money(p.amount)}</li>
+      ))}
+      {diff.people.added.map((p) => (
+        <li key={`na${p.id}`} className="pos">+ Person {p.name}</li>
+      ))}
+      {diff.people.removed.map((p) => (
+        <li key={`nr${p.id}`} className="neg">− Person {p.name}</li>
+      ))}
+      {diff.paysheet.rows
+        .filter((r) => mode === "full" || r.added || r.removed || r.changes.some((c) => c.field === "status"))
+        .map((r) => {
+          if (r.added) return <li key={`ps${r.person_id}`} className="pos">+ {r.name} added to paysheet</li>;
+          if (r.removed) return <li key={`ps${r.person_id}`} className="neg">− {r.name} removed from paysheet</li>;
+          const st = r.changes.find((c) => c.field === "status");
+          if (mode === "inputs") {
+            return <li key={`ps${r.person_id}`}>{r.name}: {st ? fmtChange(st) : ""}{settleAmt(r, st)}</li>;
+          }
+          return <li key={`ps${r.person_id}`}>{r.name}: {r.changes.map(fmtChange).join(", ")}{settleAmt(r, st)}</li>;
+        })}
+      {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
+      {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
+    </ul>
+  );
+}
+
+interface SnapshotsProps {
+  bundle: TripBundle;
+  changes: { since: SnapshotMeta | null; diff: BundleDiff | null } | null;
+  snapshots: SnapshotMeta[];
+  reload: () => Promise<void>;
+}
+
+function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
+  const tripId = bundle.trip.id;
+  const { personById } = useMaps(bundle);
+  const [label, setLabel] = useState("");
+  const [snapBusy, setSnapBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<Snapshot | null>(null);
+  // The diff that produced the open snapshot (vs the one before it). hasPrev is
+  // false for the very first snapshot (nothing to compare against).
+  const [viewingDiff, setViewingDiff] = useState<{ diff: BundleDiff | null; hasPrev: boolean } | null>(null);
+
+  async function takeSnapshot() {
+    setSnapBusy(true);
+    setErr(null);
+    try {
+      await api.takeSnapshot(tripId, label.trim() || undefined);
+      setLabel("");
+      await reload();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSnapBusy(false);
+    }
+  }
+
+  async function remove(sid: number) {
+    if (!confirm("Delete this snapshot? This cannot be undone.")) return;
+    setSnapBusy(true);
+    setErr(null);
+    try {
+      await api.deleteSnapshot(sid);
+      if (viewing?.id === sid) { setViewing(null); setViewingDiff(null); }
+      await reload();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSnapBusy(false);
+    }
+  }
+
+  async function open(sid: number) {
+    setErr(null);
+    if (viewing?.id === sid) { setViewing(null); setViewingDiff(null); return; } // toggle closed
+    try {
+      const snap = await api.getSnapshot(sid);
+      // The previous (older) snapshot is the next row in the newest-first list.
+      const idx = snapshots.findIndex((x) => x.id === sid);
+      const prevMeta = idx >= 0 ? snapshots[idx + 1] : undefined;
+      const info = prevMeta
+        ? { diff: diffBundles((await api.getSnapshot(prevMeta.id)).bundle, snap.bundle), hasPrev: true }
+        : { diff: null, hasPrev: false };
+      setViewing(snap);
+      setViewingDiff(info);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  // Download a CSV of the snapshot's reimbursement summary (its frozen
+  // paysheet), with each person's net change vs the previous snapshot.
+  async function downloadSummaryCsv(s: SnapshotMeta) {
+    setErr(null);
+    try {
+      const snap = await api.getSnapshot(s.id);
+      const idx = snapshots.findIndex((x) => x.id === s.id);
+      const prevMeta = idx >= 0 ? snapshots[idx + 1] : undefined;
+      const prev = prevMeta ? (await api.getSnapshot(prevMeta.id)).bundle : null;
+      downloadCsv(`reimbursement-summary-snapshot-${s.id}-${bundle.trip.slug}.csv`, buildSummaryCsv(snap.bundle, prev));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  const payerName = (id: number) => personById.get(id)?.name ?? `#${id}`;
+  const diff = changes?.diff;
+
+  return (
+    <div className="card">
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>Snapshots</h2>
+        <div className="spacer" />
+        <input
+          className="sm"
+          style={{ width: 160 }}
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Label (optional)"
+          disabled={snapBusy}
+        />
+        <button className="btn" disabled={snapBusy} onClick={takeSnapshot}>
+          {snapBusy ? "Saving…" : "Take snapshot"}
+        </button>
+      </div>
+
+      {err && <div className="err">{err}</div>}
+
+      {/* Changes since the latest snapshot */}
+      {changes && !changes.since && (
+        <p className="hint">No snapshots yet. Take one to freeze the current reimbursement state and track changes from here.</p>
+      )}
+      {changes?.since && diff && !diff.hasChanges && (
+        <p className="hint">No changes since {fmtTime(changes.since.created_at)}.</p>
+      )}
+      {changes?.since && diff?.hasChanges && (
+        <div style={{ marginBottom: 8 }}>
+          <h3 style={{ marginBottom: 6 }}>Changes since {fmtTime(changes.since.created_at)}</h3>
+          <DiffList diff={diff} nameOf={payerName} netOf={netFromBundle(bundle)} />
+        </div>
+      )}
+
+      {/* History — clicking a row expands the changes that went into that
+          snapshot (its diff vs the previous snapshot) inline below it. */}
+      {snapshots.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>Taken</th><th>Label</th><th>By</th><th className="num">Total</th><th className="num">Outstanding</th><th></th></tr>
+          </thead>
+          <tbody>
+            {snapshots.map((s) => {
+              const isOpen = viewing?.id === s.id;
+              return (
+                <Fragment key={s.id}>
+                  <tr className={isOpen ? "snapshot-open" : ""}>
+                    <td><a href="#" onClick={(e) => { e.preventDefault(); open(s.id); }}>{isOpen ? "▾ " : "▸ "}{fmtTime(s.created_at)}</a></td>
+                    <td>{s.label || <span className="hint">—</span>}</td>
+                    <td>{s.created_by || <span className="hint">—</span>}</td>
+                    <td className="num">{money(s.totalExpenses)}</td>
+                    <td className="num">{money(s.outstanding)}</td>
+                    <td className="num snapshot-actions">
+                      <a href="#" title="Download this snapshot's reimbursement summary as CSV" onClick={(e) => { e.preventDefault(); downloadSummaryCsv(s); }}>⬇ CSV</a>
+                      <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
+                    </td>
+                  </tr>
+                  {isOpen && viewing && (() => {
+                    // Per-person net movement vs the previous snapshot, for the ± column.
+                    const netDelta = new Map<number, number>();
+                    for (const dr of viewingDiff?.diff?.paysheet.rows ?? []) {
+                      const o = dr.changes.find((c) => c.field === "outstanding");
+                      if (o && typeof o.from === "number" && typeof o.to === "number") netDelta.set(dr.person_id, round2(o.to - o.from));
+                    }
+                    const hasPrev = !!viewingDiff?.hasPrev;
+                    return (
+                      <tr className="snapshot-detail">
+                        <td colSpan={6}>
+                          <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
+                          {!hasPrev ? (
+                            <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
+                          ) : viewingDiff?.diff?.hasChanges ? (
+                            <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} netOf={netFromBundle(viewing.bundle)} mode="inputs" />
+                          ) : (
+                            <p className="hint">No changes from the previous snapshot.</p>
+                          )}
+                          <h4 style={{ margin: "10px 0 6px" }}>Reimbursement summary</h4>
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th>
+                                <th className="num">Pre-reimbursed</th><th className="num">Net</th>
+                                {hasPrev && <th className="num">± vs prev</th>}
+                                <th>Settlement</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
+                                const o = r.outstanding;
+                                const lbl = Math.abs(o) < 0.005
+                                  ? <span className="settled">—</span>
+                                  : <span className={o > 0 ? "pos" : "neg"}>{accounting(o)}</span>;
+                                const nd = netDelta.get(r.person_id);
+                                return (
+                                  <tr key={r.person_id}>
+                                    <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
+                                    <td className="num">{r.paid ? money(r.paid) : ""}</td>
+                                    <td className="num">{r.owed ? money(r.owed) : ""}</td>
+                                    <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
+                                    <td className="num">{lbl}</td>
+                                    {hasPrev && (
+                                      <td className="num">
+                                        {nd != null && Math.abs(nd) > 0.005 && (
+                                          <span className={nd > 0 ? "pos" : "neg"}>{accounting(nd)}</span>
+                                        )}
+                                      </td>
+                                    )}
+                                    <td>{r.status}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}{hasPrev ? "; ± shows the change vs the prior snapshot" : ""}.</small></p>
+                        </td>
+                      </tr>
+                    );
+                  })()}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

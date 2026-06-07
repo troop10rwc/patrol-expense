@@ -133,6 +133,22 @@ export interface TripBundle {
   paysheet: Paysheet;
 }
 
+/** Lightweight snapshot row for the history list (no full bundle payload). */
+export interface SnapshotMeta {
+  id: number;
+  trip_id: number;
+  label: string | null;
+  created_by: string | null;
+  created_at: string;
+  totalExpenses: number; // pulled from the stored bundle's paysheet
+  outstanding: number; // sum of |outstanding| still owed at snapshot time
+}
+
+/** A full, immutable snapshot: metadata plus the frozen TripBundle. */
+export interface Snapshot extends SnapshotMeta {
+  bundle: TripBundle;
+}
+
 /** Lightweight per-trip rollup for the index page. */
 export interface TripSummary {
   trip: Trip;

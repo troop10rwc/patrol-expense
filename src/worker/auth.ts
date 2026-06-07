@@ -11,7 +11,8 @@ export interface AuthBindings {
   DB: D1Database;
   ROSTER: D1Database;
   CF_ACCESS_TEAM_DOMAIN: string; // e.g. troop10rwc.cloudflareaccess.com
-  CF_ACCESS_AUD: string; // Access application AUD tag
+  CF_ACCESS_AUD: string; // Access application AUD tag (production)
+  CF_ACCESS_AUD_PREVIEW?: string; // AUD of the Access app guarding preview hostnames
   // DEV ONLY: when "1", skip Access and treat every request as a fixed dev user.
   // Set in .dev.vars for local work (there's no Access in front locally).
   DEV_AUTH_BYPASS?: string;
@@ -59,10 +60,13 @@ async function verifyAccessJwt(token: string, env: AuthBindings): Promise<Identi
     return null;
   }
 
-  // Claims.
+  // Claims. Accept a token issued for the production app OR the preview app, so
+  // the same Worker authenticates on troop10rwc.org and on the workers.dev
+  // preview hostnames (each Access application has its own AUD tag).
   if (payload.iss !== `https://${env.CF_ACCESS_TEAM_DOMAIN}`) return null;
   const aud = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
-  if (!aud.includes(env.CF_ACCESS_AUD)) return null;
+  const allowedAud = [env.CF_ACCESS_AUD, env.CF_ACCESS_AUD_PREVIEW].filter(Boolean);
+  if (!aud.some((a) => allowedAud.includes(a))) return null;
   if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
 
   // Signature (RS256).

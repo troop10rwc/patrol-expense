@@ -9,7 +9,10 @@
   "vars": {
     "ENVIRONMENT": "production",
     "CF_ACCESS_TEAM_DOMAIN": "troop10rwc.cloudflareaccess.com",
-    "CF_ACCESS_AUD": "070c36323eb0321ed17203a1b6997e7489cac583535f93e933a61ba274a02c0b"
+    "CF_ACCESS_AUD": "070c36323eb0321ed17203a1b6997e7489cac583535f93e933a61ba274a02c0b",
+    // Second Access application that protects the workers.dev branch/commit
+    // preview hostnames. A JWT for either AUD is accepted (see auth.ts).
+    "CF_ACCESS_AUD_PREVIEW": "16fbe4b476b6e9d9d601170b34a8c62b2a99b8f0bd846112ea1de296856c99f2"
   },
   // Serve the app as a same-origin tab at troop10rwc.org/expenses. Requires
   // troop10rwc.org to be a Cloudflare zone on this account (proxied DNS).

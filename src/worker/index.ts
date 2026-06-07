@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import type { Trip } from "../shared/types.ts";
+import type { Trip, TripBundle, SnapshotMeta } from "../shared/types.ts";
+import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups } from "./db.ts";
 import { fetchRoster } from "./roster.ts";
@@ -38,6 +39,23 @@ async function bundleResponse(db: D1Database, tripId: number) {
   const bundle = await loadTripBundle(db, tripId);
   if (!bundle) return null;
   return bundle;
+}
+
+type SnapshotRow = { id: number; trip_id: number; label: string | null; created_by: string | null; created_at: string; bundle: string };
+
+// Derive the lightweight list row from a stored snapshot, reading the headline
+// numbers out of the frozen bundle so the list shows the bottom line without
+// shipping the whole JSON blob.
+function snapshotMeta(row: Omit<SnapshotRow, "bundle">, bundle: TripBundle): SnapshotMeta {
+  return {
+    id: row.id,
+    trip_id: row.trip_id,
+    label: row.label,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    totalExpenses: bundle.paysheet.totalExpenses,
+    outstanding: bundle.paysheet.rows.reduce((s, r) => s + Math.max(0, r.outstanding), 0),
+  };
 }
 
 // ---- trips ----
@@ -361,6 +379,63 @@ api.put("/trips/:id/settlements/:pid", async (c) => {
     .bind(tripId, pid, b.status)
     .run();
   return c.json(await bundleResponse(c.env.DB, tripId));
+});
+
+// ---- snapshots (immutable point-in-time records of the full bundle) ----
+api.post("/trips/:id/snapshots", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const b = await c.req.json<{ label?: string }>().catch(() => ({ label: undefined }));
+  const bundle = await loadTripBundle(c.env.DB, tripId);
+  if (!bundle) return c.json(bad("trip not found"), 404);
+  const label = b.label?.trim() || null;
+  const createdBy = c.get("user").email;
+  const res = await c.env.DB.prepare(
+    "INSERT INTO snapshots (trip_id, label, created_by, bundle) VALUES (?, ?, ?, ?)",
+  )
+    .bind(tripId, label, createdBy, JSON.stringify(bundle))
+    .run();
+  const row = await c.env.DB.prepare("SELECT id, trip_id, label, created_by, created_at FROM snapshots WHERE id = ?")
+    .bind(res.meta.last_row_id)
+    .first<Omit<SnapshotRow, "bundle">>();
+  return c.json(snapshotMeta(row!, bundle), 201);
+});
+
+api.get("/trips/:id/snapshots", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, trip_id, label, created_by, created_at, bundle FROM snapshots WHERE trip_id = ? ORDER BY id DESC",
+  )
+    .bind(tripId)
+    .all<SnapshotRow>();
+  return c.json(results.map((r) => snapshotMeta(r, JSON.parse(r.bundle) as TripBundle)));
+});
+
+api.get("/snapshots/:sid", async (c) => {
+  const sid = Number(c.req.param("sid"));
+  const row = await c.env.DB.prepare("SELECT * FROM snapshots WHERE id = ?").bind(sid).first<SnapshotRow>();
+  if (!row) return c.json(bad("snapshot not found"), 404);
+  const bundle = JSON.parse(row.bundle) as TripBundle;
+  return c.json({ ...snapshotMeta(row, bundle), bundle });
+});
+
+api.delete("/snapshots/:sid", async (c) => {
+  await c.env.DB.prepare("DELETE FROM snapshots WHERE id = ?").bind(Number(c.req.param("sid"))).run();
+  return c.json({ ok: true });
+});
+
+// What changed since the most recent snapshot (null when none exists yet).
+api.get("/trips/:id/changes", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const current = await loadTripBundle(c.env.DB, tripId);
+  if (!current) return c.json(bad("trip not found"), 404);
+  const row = await c.env.DB.prepare(
+    "SELECT id, trip_id, label, created_by, created_at, bundle FROM snapshots WHERE trip_id = ? ORDER BY id DESC LIMIT 1",
+  )
+    .bind(tripId)
+    .first<SnapshotRow>();
+  if (!row) return c.json({ since: null, diff: null });
+  const prev = JSON.parse(row.bundle) as TripBundle;
+  return c.json({ since: snapshotMeta(row, prev), diff: diffBundles(prev, current) });
 });
 
 // ---- geo (Google Maps proxy; key stays server-side) ----
