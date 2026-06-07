@@ -147,6 +147,8 @@ tr.row-added > td { background: #e8f8ee; }
 tr.snapshot-open > td { background: var(--chip); }
 tr.snapshot-detail > td { background: var(--chip); padding: 8px 12px; }
 tr.snapshot-detail table { margin: 0; background: #fff; }
+.snapshot-actions { white-space: nowrap; }
+.snapshot-actions a { margin-right: 10px; }
 .changed-key { background: #fff3cd; box-shadow: inset 2px 0 0 #e0a800; padding: 0 5px; border-radius: 3px; color: var(--ink); }
 
 /* Member chips (pills) */

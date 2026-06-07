@@ -11,7 +11,7 @@ import type {
   SnapshotMeta,
   Snapshot,
 } from "../shared/types.ts";
-import type { BundleDiff, FieldChange } from "../shared/diff.ts";
+import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -731,6 +731,18 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
     }
   }
 
+  // Download a CSV of everything that changed between a snapshot and now.
+  async function downloadSnapshotCsv(s: SnapshotMeta) {
+    setErr(null);
+    try {
+      const snap = await api.getSnapshot(s.id);
+      const d = diffBundles(snap.bundle, bundle);
+      downloadCsv(`changes-${bundle.trip.slug}-since-snapshot-${s.id}.csv`, buildChangesCsv(d, payerName));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
   const payerName = (id: number) => personById.get(id)?.name ?? `#${id}`;
   const diff = changes?.diff;
 
@@ -763,19 +775,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
       )}
       {changes?.since && diff?.hasChanges && (
         <div style={{ marginBottom: 8 }}>
-          <div className="toolbar" style={{ marginBottom: 6 }}>
-            <h3 style={{ margin: 0 }}>Changes since {fmtTime(changes.since.created_at)}</h3>
-            <div className="spacer" />
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                downloadCsv(`changes-${bundle.trip.slug}-since-snapshot-${changes.since!.id}.csv`, buildChangesCsv(diff, payerName));
-              }}
-            >
-              ⬇ Download CSV
-            </a>
-          </div>
+          <h3 style={{ marginBottom: 6 }}>Changes since {fmtTime(changes.since.created_at)}</h3>
           <ul className="diff">
             {diff.expenses.added.map((e) => (
               <li key={`ea${e.id}`} className="pos">+ Expense “{e.description}” {money(e.amount)} (paid by {payerName(e.payer_id)})</li>
@@ -828,7 +828,10 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                     <td>{s.created_by || <span className="hint">—</span>}</td>
                     <td className="num">{money(s.totalExpenses)}</td>
                     <td className="num">{money(s.outstanding)}</td>
-                    <td className="num"><button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button></td>
+                    <td className="num snapshot-actions">
+                      <a href="#" title="Download changes since this snapshot as CSV" onClick={(e) => { e.preventDefault(); downloadSnapshotCsv(s); }}>⬇ CSV</a>
+                      <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
+                    </td>
                   </tr>
                   {isOpen && viewing && (
                     <tr className="snapshot-detail">
