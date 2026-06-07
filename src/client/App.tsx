@@ -524,7 +524,6 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             <th className="num">Owes (share)</th>
             <th className="num">Pre-reimbursed</th>
             <th className="num">Net</th>
-            <th className="num" title="Change in net since the last snapshot">± vs snapshot</th>
             <th>Settlement</th>
           </tr>
         </thead>
@@ -543,10 +542,6 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
               const c = rc?.fields.get(f);
               return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
             };
-            // Net change since the last snapshot (signed): up => owed more / owes
-            // less (green); down => owes more / owed less (red).
-            const oc = rc?.fields.get("outstanding");
-            const netDelta = oc && typeof oc.from === "number" && typeof oc.to === "number" ? round2(oc.to - oc.from) : null;
             return (
               <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
                 <td>{r.name} {r.code && <span className="hint">({r.code})</span>}{rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}</td>
@@ -554,11 +549,6 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                 <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
                 <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
                 <td className={cls("outstanding")}>{label}</td>
-                <td className="num">
-                  {netDelta != null && Math.abs(netDelta) > 0.005 && (
-                    <span className={netDelta > 0 ? "pos" : "neg"}>{netDelta > 0 ? "+" : "−"}{money(Math.abs(netDelta))}</span>
-                  )}
-                </td>
                 <td className={rc?.fields.has("status") ? "changed" : ""}>
                   <select
                     className={`status-${r.status}`}
@@ -579,7 +569,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={7} className="empty">No activity yet.</td></tr>
+            <tr><td colSpan={6} className="empty">No activity yet.</td></tr>
           )}
         </tbody>
       </table>
@@ -617,6 +607,12 @@ function csvCell(v: unknown): string {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Accounting-style money: negatives in parentheses, e.g. -208.5 -> "($208.50)".
+function accounting(n: number): string {
+  const s = `$${Math.abs(n).toFixed(2)}`;
+  return n < 0 ? `(${s})` : s;
+}
 
 // Net outstanding in plain words. outstanding > 0 => the troop owes the person
 // (a reimbursement is due); < 0 => the person owes the troop.
@@ -908,9 +904,9 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                             <tbody>
                               {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
                                 const o = r.outstanding;
-                                const lbl = o > 0.005 ? <span className="pos">owed {money(o)}</span>
-                                  : o < -0.005 ? <span className="neg">owes {money(-o)}</span>
-                                  : <span className="settled">—</span>;
+                                const lbl = Math.abs(o) < 0.005
+                                  ? <span className="settled">—</span>
+                                  : <span className={o > 0 ? "pos" : "neg"}>{accounting(o)}</span>;
                                 const nd = netDelta.get(r.person_id);
                                 return (
                                   <tr key={r.person_id}>
@@ -922,7 +918,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                                     {hasPrev && (
                                       <td className="num">
                                         {nd != null && Math.abs(nd) > 0.005 && (
-                                          <span className={nd > 0 ? "pos" : "neg"}>{nd > 0 ? "+" : "−"}{money(Math.abs(nd))}</span>
+                                          <span className={nd > 0 ? "pos" : "neg"}>{accounting(nd)}</span>
                                         )}
                                       </td>
                                     )}
