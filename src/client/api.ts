@@ -1,4 +1,5 @@
-import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember } from "../shared/types.ts";
+import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot } from "../shared/types.ts";
+import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
 
@@ -76,6 +77,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ status }),
     }),
+
+  // ---- snapshots ----
+  takeSnapshot: (tripId: number, label?: string) =>
+    req<SnapshotMeta>(`/api/trips/${tripId}/snapshots`, {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
+  listSnapshots: (tripId: number) => req<SnapshotMeta[]>(`/api/trips/${tripId}/snapshots`),
+  getSnapshot: (sid: number) => req<Snapshot>(`/api/snapshots/${sid}`),
+  deleteSnapshot: (sid: number) => req<{ ok: true }>(`/api/snapshots/${sid}`, { method: "DELETE" }),
+  getChanges: (tripId: number) =>
+    req<{ since: SnapshotMeta | null; diff: BundleDiff | null }>(`/api/trips/${tripId}/changes`),
 
   geoAutocomplete: (q: string) =>
     req<{ description: string }[]>(`/api/geo/autocomplete?q=${encodeURIComponent(q)}`),

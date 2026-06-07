@@ -136,6 +136,15 @@ small.hint { color: var(--muted); }
 .status-requested { color: #9a6b00; }
 .status-received { color: var(--accent); }
 .status-paid { color: var(--pos); }
+ul.diff { margin: 0 0 4px; padding-left: 18px; }
+ul.diff li { padding: 2px 0; font-size: 14px; }
+
+/* Snapshot diff highlighting on the paysheet */
+td.changed { background: #fff3cd; box-shadow: inset 2px 0 0 #e0a800; }
+tr.row-added > td { background: #e8f8ee; }
+.pill-new { background: var(--pos); color: #fff; }
+.diff-note { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.changed-key { background: #fff3cd; box-shadow: inset 2px 0 0 #e0a800; padding: 0 5px; border-radius: 3px; color: var(--ink); }
 
 /* Member chips (pills) */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px; }
