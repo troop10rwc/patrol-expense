@@ -524,6 +524,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             <th className="num">Owes (share)</th>
             <th className="num">Pre-reimbursed</th>
             <th className="num">Net</th>
+            <th className="num" title="Change in net since the last snapshot">± vs snapshot</th>
             <th>Settlement</th>
           </tr>
         </thead>
@@ -542,13 +543,22 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
               const c = rc?.fields.get(f);
               return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
             };
+            // Net change since the last snapshot (signed): up => owed more / owes
+            // less (green); down => owes more / owed less (red).
+            const oc = rc?.fields.get("outstanding");
+            const netDelta = oc && typeof oc.from === "number" && typeof oc.to === "number" ? round2(oc.to - oc.from) : null;
             return (
               <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
                 <td>{r.name} {r.code && <span className="hint">({r.code})</span>}{rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}</td>
                 <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
                 <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
                 <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
-                <td className={cls("outstanding")}>{label}{note("outstanding")}</td>
+                <td className={cls("outstanding")}>{label}</td>
+                <td className="num">
+                  {netDelta != null && Math.abs(netDelta) > 0.005 && (
+                    <span className={netDelta > 0 ? "pos" : "neg"}>{netDelta > 0 ? "+" : "−"}{money(Math.abs(netDelta))}</span>
+                  )}
+                </td>
                 <td className={rc?.fields.has("status") ? "changed" : ""}>
                   <select
                     className={`status-${r.status}`}
@@ -569,7 +579,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={6} className="empty">No activity yet.</td></tr>
+            <tr><td colSpan={7} className="empty">No activity yet.</td></tr>
           )}
         </tbody>
       </table>
@@ -677,6 +687,51 @@ function downloadCsv(filename: string, csv: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Resolve a person id to a name using a specific bundle's people. */
+function nameFromBundle(b: TripBundle): (id: number) => string {
+  const m = new Map(b.people.map((p) => [p.id, p.name] as const));
+  return (id) => m.get(id) ?? `#${id}`;
+}
+
+/** Itemized human-readable list of a diff. Shared by the "changes since" panel
+ * and each snapshot's "what went into this snapshot" expansion. */
+function DiffList({ diff, nameOf }: { diff: BundleDiff; nameOf: (id: number) => string }) {
+  return (
+    <ul className="diff">
+      {diff.expenses.added.map((e) => (
+        <li key={`ea${e.id}`} className="pos">+ Expense “{e.description}” {money(e.amount)} (paid by {nameOf(e.payer_id)})</li>
+      ))}
+      {diff.expenses.removed.map((e) => (
+        <li key={`er${e.id}`} className="neg">− Expense “{e.description}” {money(e.amount)}</li>
+      ))}
+      {diff.expenses.changed.map((e) => (
+        <li key={`ec${e.id}`}>✎ Expense “{e.description}” — {e.changes.map(fmtChange).join(", ")}</li>
+      ))}
+      {diff.prepayments.added.map((p) => (
+        <li key={`pa${p.id}`} className="pos">+ Pre-reimbursement {money(p.amount)} to {nameOf(p.person_id)}</li>
+      ))}
+      {diff.prepayments.removed.map((p) => (
+        <li key={`pr${p.id}`} className="neg">− Pre-reimbursement {money(p.amount)}</li>
+      ))}
+      {diff.people.added.map((p) => (
+        <li key={`na${p.id}`} className="pos">+ Person {p.name}</li>
+      ))}
+      {diff.people.removed.map((p) => (
+        <li key={`nr${p.id}`} className="neg">− Person {p.name}</li>
+      ))}
+      {diff.paysheet.rows.map((r) => (
+        <li key={`ps${r.person_id}`}>
+          {r.added ? <span className="pos">+ {r.name} added to paysheet</span>
+            : r.removed ? <span className="neg">− {r.name} removed from paysheet</span>
+            : <>{r.name}: {r.changes.map(fmtChange).join(", ")}</>}
+        </li>
+      ))}
+      {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
+      {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
+    </ul>
+  );
+}
+
 interface SnapshotsProps {
   bundle: TripBundle;
   changes: { since: SnapshotMeta | null; diff: BundleDiff | null } | null;
@@ -691,6 +746,9 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
   const [snapBusy, setSnapBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [viewing, setViewing] = useState<Snapshot | null>(null);
+  // The diff that produced the open snapshot (vs the one before it). hasPrev is
+  // false for the very first snapshot (nothing to compare against).
+  const [viewingDiff, setViewingDiff] = useState<{ diff: BundleDiff | null; hasPrev: boolean } | null>(null);
 
   async function takeSnapshot() {
     setSnapBusy(true);
@@ -712,7 +770,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
     setErr(null);
     try {
       await api.deleteSnapshot(sid);
-      if (viewing?.id === sid) setViewing(null);
+      if (viewing?.id === sid) { setViewing(null); setViewingDiff(null); }
       await reload();
     } catch (e) {
       setErr(String(e));
@@ -723,9 +781,17 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
 
   async function open(sid: number) {
     setErr(null);
-    if (viewing?.id === sid) { setViewing(null); return; } // toggle closed
+    if (viewing?.id === sid) { setViewing(null); setViewingDiff(null); return; } // toggle closed
     try {
-      setViewing(await api.getSnapshot(sid));
+      const snap = await api.getSnapshot(sid);
+      // The previous (older) snapshot is the next row in the newest-first list.
+      const idx = snapshots.findIndex((x) => x.id === sid);
+      const prevMeta = idx >= 0 ? snapshots[idx + 1] : undefined;
+      const info = prevMeta
+        ? { diff: diffBundles((await api.getSnapshot(prevMeta.id)).bundle, snap.bundle), hasPrev: true }
+        : { diff: null, hasPrev: false };
+      setViewing(snap);
+      setViewingDiff(info);
     } catch (e) {
       setErr(String(e));
     }
@@ -776,42 +842,12 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
       {changes?.since && diff?.hasChanges && (
         <div style={{ marginBottom: 8 }}>
           <h3 style={{ marginBottom: 6 }}>Changes since {fmtTime(changes.since.created_at)}</h3>
-          <ul className="diff">
-            {diff.expenses.added.map((e) => (
-              <li key={`ea${e.id}`} className="pos">+ Expense “{e.description}” {money(e.amount)} (paid by {payerName(e.payer_id)})</li>
-            ))}
-            {diff.expenses.removed.map((e) => (
-              <li key={`er${e.id}`} className="neg">− Expense “{e.description}” {money(e.amount)}</li>
-            ))}
-            {diff.expenses.changed.map((e) => (
-              <li key={`ec${e.id}`}>✎ Expense “{e.description}” — {e.changes.map(fmtChange).join(", ")}</li>
-            ))}
-            {diff.prepayments.added.map((p) => (
-              <li key={`pa${p.id}`} className="pos">+ Pre-reimbursement {money(p.amount)} to {payerName(p.person_id)}</li>
-            ))}
-            {diff.prepayments.removed.map((p) => (
-              <li key={`pr${p.id}`} className="neg">− Pre-reimbursement {money(p.amount)}</li>
-            ))}
-            {diff.people.added.map((p) => (
-              <li key={`na${p.id}`} className="pos">+ Person {p.name}</li>
-            ))}
-            {diff.people.removed.map((p) => (
-              <li key={`nr${p.id}`} className="neg">− Person {p.name}</li>
-            ))}
-            {diff.paysheet.rows.map((r) => (
-              <li key={`ps${r.person_id}`}>
-                {r.added ? <span className="pos">+ {r.name} added to paysheet</span>
-                  : r.removed ? <span className="neg">− {r.name} removed from paysheet</span>
-                  : <>{r.name}: {r.changes.map(fmtChange).join(", ")}</>}
-              </li>
-            ))}
-            {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
-            {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
-          </ul>
+          <DiffList diff={diff} nameOf={payerName} />
         </div>
       )}
 
-      {/* History — clicking a row expands its frozen paysheet inline below it. */}
+      {/* History — clicking a row expands the changes that went into that
+          snapshot (its diff vs the previous snapshot) inline below it. */}
       {snapshots.length > 0 && (
         <table>
           <thead>
@@ -836,30 +872,15 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                   {isOpen && viewing && (
                     <tr className="snapshot-detail">
                       <td colSpan={6}>
-                        <table>
-                          <thead>
-                            <tr><th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th><th className="num">Pre-reimbursed</th><th className="num">Net</th><th>Settlement</th></tr>
-                          </thead>
-                          <tbody>
-                            {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
-                              const o = r.outstanding;
-                              const lbl = o > 0.005 ? <span className="pos">owed {money(o)}</span>
-                                : o < -0.005 ? <span className="neg">owes {money(-o)}</span>
-                                : <span className="settled">—</span>;
-                              return (
-                                <tr key={r.person_id}>
-                                  <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
-                                  <td className="num">{r.paid ? money(r.paid) : ""}</td>
-                                  <td className="num">{r.owed ? money(r.owed) : ""}</td>
-                                  <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
-                                  <td className="num">{lbl}</td>
-                                  <td>{r.status}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                        <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}.</small></p>
+                        <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
+                        {!viewingDiff?.hasPrev ? (
+                          <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
+                        ) : viewingDiff.diff?.hasChanges ? (
+                          <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} />
+                        ) : (
+                          <p className="hint">No changes from the previous snapshot.</p>
+                        )}
+                        <p><small className="hint">Frozen as of {fmtTime(viewing.created_at)} — changes vs the prior snapshot.</small></p>
                       </td>
                     </tr>
                   )}
