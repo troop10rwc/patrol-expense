@@ -693,9 +693,12 @@ function nameFromBundle(b: TripBundle): (id: number) => string {
   return (id) => m.get(id) ?? `#${id}`;
 }
 
-/** Itemized human-readable list of a diff. Shared by the "changes since" panel
- * and each snapshot's "what went into this snapshot" expansion. */
-function DiffList({ diff, nameOf }: { diff: BundleDiff; nameOf: (id: number) => string }) {
+/** Itemized human-readable list of a diff.
+ * mode "full"   — every change, including each person's recomputed paysheet row.
+ * mode "inputs" — only the edits that were actually made (expenses, prepayments,
+ *   people, settlement status) plus totals; the derived per-person share/net
+ *   recalculations are left out (those show up in the summary table's ± column). */
+function DiffList({ diff, nameOf, mode = "full" }: { diff: BundleDiff; nameOf: (id: number) => string; mode?: "full" | "inputs" }) {
   return (
     <ul className="diff">
       {diff.expenses.added.map((e) => (
@@ -719,13 +722,17 @@ function DiffList({ diff, nameOf }: { diff: BundleDiff; nameOf: (id: number) => 
       {diff.people.removed.map((p) => (
         <li key={`nr${p.id}`} className="neg">− Person {p.name}</li>
       ))}
-      {diff.paysheet.rows.map((r) => (
-        <li key={`ps${r.person_id}`}>
-          {r.added ? <span className="pos">+ {r.name} added to paysheet</span>
-            : r.removed ? <span className="neg">− {r.name} removed from paysheet</span>
-            : <>{r.name}: {r.changes.map(fmtChange).join(", ")}</>}
-        </li>
-      ))}
+      {diff.paysheet.rows
+        .filter((r) => mode === "full" || r.added || r.removed || r.changes.some((c) => c.field === "status"))
+        .map((r) => {
+          if (r.added) return <li key={`ps${r.person_id}`} className="pos">+ {r.name} added to paysheet</li>;
+          if (r.removed) return <li key={`ps${r.person_id}`} className="neg">− {r.name} removed from paysheet</li>;
+          if (mode === "inputs") {
+            const st = r.changes.find((c) => c.field === "status");
+            return <li key={`ps${r.person_id}`}>{r.name}: {st ? fmtChange(st) : ""}</li>;
+          }
+          return <li key={`ps${r.person_id}`}>{r.name}: {r.changes.map(fmtChange).join(", ")}</li>;
+        })}
       {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
       {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
     </ul>
@@ -869,21 +876,67 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                       <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
                     </td>
                   </tr>
-                  {isOpen && viewing && (
-                    <tr className="snapshot-detail">
-                      <td colSpan={6}>
-                        <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
-                        {!viewingDiff?.hasPrev ? (
-                          <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
-                        ) : viewingDiff.diff?.hasChanges ? (
-                          <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} />
-                        ) : (
-                          <p className="hint">No changes from the previous snapshot.</p>
-                        )}
-                        <p><small className="hint">Frozen as of {fmtTime(viewing.created_at)} — changes vs the prior snapshot.</small></p>
-                      </td>
-                    </tr>
-                  )}
+                  {isOpen && viewing && (() => {
+                    // Per-person net movement vs the previous snapshot, for the ± column.
+                    const netDelta = new Map<number, number>();
+                    for (const dr of viewingDiff?.diff?.paysheet.rows ?? []) {
+                      const o = dr.changes.find((c) => c.field === "outstanding");
+                      if (o && typeof o.from === "number" && typeof o.to === "number") netDelta.set(dr.person_id, round2(o.to - o.from));
+                    }
+                    const hasPrev = !!viewingDiff?.hasPrev;
+                    return (
+                      <tr className="snapshot-detail">
+                        <td colSpan={6}>
+                          <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
+                          {!hasPrev ? (
+                            <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
+                          ) : viewingDiff?.diff?.hasChanges ? (
+                            <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} mode="inputs" />
+                          ) : (
+                            <p className="hint">No changes from the previous snapshot.</p>
+                          )}
+                          <h4 style={{ margin: "10px 0 6px" }}>Reimbursement summary</h4>
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th>
+                                <th className="num">Pre-reimbursed</th><th className="num">Net</th>
+                                {hasPrev && <th className="num">± vs prev</th>}
+                                <th>Settlement</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
+                                const o = r.outstanding;
+                                const lbl = o > 0.005 ? <span className="pos">owed {money(o)}</span>
+                                  : o < -0.005 ? <span className="neg">owes {money(-o)}</span>
+                                  : <span className="settled">—</span>;
+                                const nd = netDelta.get(r.person_id);
+                                return (
+                                  <tr key={r.person_id}>
+                                    <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
+                                    <td className="num">{r.paid ? money(r.paid) : ""}</td>
+                                    <td className="num">{r.owed ? money(r.owed) : ""}</td>
+                                    <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
+                                    <td className="num">{lbl}</td>
+                                    {hasPrev && (
+                                      <td className="num">
+                                        {nd != null && Math.abs(nd) > 0.005 && (
+                                          <span className={nd > 0 ? "pos" : "neg"}>{nd > 0 ? "+" : "−"}{money(Math.abs(nd))}</span>
+                                        )}
+                                      </td>
+                                    )}
+                                    <td>{r.status}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}{hasPrev ? "; ± shows the change vs the prior snapshot" : ""}.</small></p>
+                        </td>
+                      </tr>
+                    );
+                  })()}
                 </Fragment>
               );
             })}
