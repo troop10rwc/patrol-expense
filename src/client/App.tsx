@@ -701,6 +701,16 @@ function netFromBundle(b: TripBundle): (id: number) => number | undefined {
   return (id) => m.get(id);
 }
 
+/** An empty bundle (same trip), so diffing the first snapshot against it
+ * surfaces its whole contents as a baseline rather than an empty diff. */
+function emptyBundle(b: TripBundle): TripBundle {
+  return {
+    ...b,
+    people: [], groups: [], expenses: [], members: [], prepayments: [], travelDrivers: [],
+    groupSummaries: [], paysheet: { rows: [], totalExpenses: 0, totalPrepaid: 0 },
+  };
+}
+
 /** Itemized human-readable list of a diff.
  * mode "full"   — every change, including each person's recomputed paysheet row.
  * mode "inputs" — only the edits that were actually made (expenses, prepayments,
@@ -819,13 +829,18 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
     }
   }
 
-  // Download a CSV of everything that changed between a snapshot and now.
+  // Download a CSV of the changes captured in a snapshot (its diff vs the
+  // previous snapshot) — matching the inline "changes captured" view. The first
+  // snapshot is diffed against an empty bundle so it exports its full contents.
   async function downloadSnapshotCsv(s: SnapshotMeta) {
     setErr(null);
     try {
       const snap = await api.getSnapshot(s.id);
-      const d = diffBundles(snap.bundle, bundle);
-      downloadCsv(`changes-${bundle.trip.slug}-since-snapshot-${s.id}.csv`, buildChangesCsv(d, payerName, netFromBundle(bundle)));
+      const idx = snapshots.findIndex((x) => x.id === s.id);
+      const prevMeta = idx >= 0 ? snapshots[idx + 1] : undefined;
+      const prevBundle = prevMeta ? (await api.getSnapshot(prevMeta.id)).bundle : emptyBundle(snap.bundle);
+      const d = diffBundles(prevBundle, snap.bundle);
+      downloadCsv(`changes-in-snapshot-${s.id}-${bundle.trip.slug}.csv`, buildChangesCsv(d, nameFromBundle(snap.bundle), netFromBundle(snap.bundle)));
     } catch (e) {
       setErr(String(e));
     }
@@ -887,7 +902,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                     <td className="num">{money(s.totalExpenses)}</td>
                     <td className="num">{money(s.outstanding)}</td>
                     <td className="num snapshot-actions">
-                      <a href="#" title="Download changes since this snapshot as CSV" onClick={(e) => { e.preventDefault(); downloadSnapshotCsv(s); }}>⬇ CSV</a>
+                      <a href="#" title="Download the changes captured in this snapshot as CSV" onClick={(e) => { e.preventDefault(); downloadSnapshotCsv(s); }}>⬇ CSV</a>
                       <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
                     </td>
                   </tr>
