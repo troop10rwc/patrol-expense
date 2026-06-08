@@ -1,11 +1,28 @@
 import type { MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
+import { verifyAccessJwt } from "@troop10rwc/worker-kit";
+import type { Identity } from "@troop10rwc/shared";
 
 // The whole troop10rwc.org domain sits behind Cloudflare Access (Zero Trust)
 // with Slack as the identity provider. Access authenticates users at the edge
 // before requests reach this Worker and injects a signed JWT
 // (Cf-Access-Jwt-Assertion header / CF_Authorization cookie). We verify that
 // JWT and read the user's identity from it — no app-level sign-in needed.
+//
+// The RS256 + JWKS verification itself lives in @troop10rwc/worker-kit's
+// verifyAccessJwt (shared across Troop 10 apps). This module keeps only the two
+// app-specific behaviors the kit's single-AUD `withAuth` doesn't yet cover:
+//   1. token source — Access forwards the JWT as a header on API calls but only
+//      sets the CF_Authorization cookie on top-level navigations, so we fall
+//      back to the cookie.
+//   2. dual audience — production and the workers.dev preview hostnames are two
+//      separate Access applications with distinct AUD tags; a token for either
+//      is accepted.
+// When worker-kit gains cookie-fallback + multi-AUD support, this can collapse
+// onto the kit's withAuth/requireLeader directly.
+
+// Re-export so existing importers (src/worker/index.ts) keep a single source.
+export type { Identity };
 
 export interface AuthBindings {
   DB: D1Database;
@@ -18,74 +35,30 @@ export interface AuthBindings {
   DEV_AUTH_BYPASS?: string;
 }
 
-export interface Identity {
-  email: string;
-  name: string;
-}
-
-// JWKS for the Access team, cached per isolate.
-let jwksCache: { keys: JsonWebKey[]; expires: number } | null = null;
-
-async function getSigningKeys(teamDomain: string): Promise<JsonWebKey[]> {
-  if (jwksCache && jwksCache.expires > Date.now()) return jwksCache.keys;
-  const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
-  const data = (await res.json()) as { keys?: JsonWebKey[] };
-  jwksCache = { keys: data.keys ?? [], expires: Date.now() + 60 * 60 * 1000 };
-  return jwksCache.keys;
-}
-
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
-  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-function decodeSegment<T = Record<string, unknown>>(s: string): T {
-  return JSON.parse(new TextDecoder().decode(b64urlToBytes(s)));
-}
-
-/** Verify a Cloudflare Access JWT and return the user's identity, or null. */
-async function verifyAccessJwt(token: string, env: AuthBindings): Promise<Identity | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [h, p, sig] = parts;
-
-  let header: { kid?: string; alg?: string };
-  let payload: { iss?: string; aud?: string | string[]; exp?: number; email?: string; custom?: Record<string, unknown> };
-  try {
-    header = decodeSegment(h);
-    payload = decodeSegment(p);
-  } catch {
-    return null;
+/**
+ * Verify a Cloudflare Access JWT, accepting a token issued for the production
+ * app OR the preview app. Delegates the signature/claims check to worker-kit's
+ * verifyAccessJwt (which throws on failure); returns the identity for the first
+ * audience that validates, or null if none do.
+ */
+async function verifyForAnyAudience(
+  token: string,
+  env: AuthBindings,
+): Promise<Identity | null> {
+  const audiences = [env.CF_ACCESS_AUD, env.CF_ACCESS_AUD_PREVIEW].filter(
+    (a): a is string => Boolean(a),
+  );
+  for (const audience of audiences) {
+    try {
+      return await verifyAccessJwt(token, {
+        teamDomain: env.CF_ACCESS_TEAM_DOMAIN,
+        audience,
+      });
+    } catch {
+      // Wrong AUD (or otherwise invalid) for this app — try the next one.
+    }
   }
-
-  // Claims. Accept a token issued for the production app OR the preview app, so
-  // the same Worker authenticates on troop10rwc.org and on the workers.dev
-  // preview hostnames (each Access application has its own AUD tag).
-  if (payload.iss !== `https://${env.CF_ACCESS_TEAM_DOMAIN}`) return null;
-  const aud = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
-  const allowedAud = [env.CF_ACCESS_AUD, env.CF_ACCESS_AUD_PREVIEW].filter(Boolean);
-  if (!aud.some((a) => allowedAud.includes(a))) return null;
-  if (!payload.exp || payload.exp * 1000 < Date.now()) return null;
-
-  // Signature (RS256).
-  const jwk = (await getSigningKeys(env.CF_ACCESS_TEAM_DOMAIN)).find(
-    (k) => (k as JsonWebKey & { kid?: string }).kid === header.kid,
-  );
-  if (!jwk) return null;
-  const key = await crypto.subtle.importKey(
-    "jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"],
-  );
-  const ok = await crypto.subtle.verify(
-    "RSASSA-PKCS1-v1_5", key, b64urlToBytes(sig), new TextEncoder().encode(`${h}.${p}`),
-  );
-  if (!ok) return null;
-
-  const email = String(payload.email ?? "");
-  if (!email) return null;
-  const name = String((payload.custom?.name as string) ?? email);
-  return { email, name };
+  return null;
 }
 
 /** Require a Cloudflare Access-authenticated user; sets `user` in context. */
@@ -96,7 +69,7 @@ export const requireAuth: MiddlewareHandler<{ Bindings: AuthBindings; Variables:
   }
   const token =
     c.req.header("Cf-Access-Jwt-Assertion") || getCookie(c, "CF_Authorization");
-  const id = token ? await verifyAccessJwt(token, c.env) : null;
+  const id = token ? await verifyForAnyAudience(token, c.env) : null;
   if (!id) return c.json({ error: "unauthorized" }, 401);
   c.set("user", id);
   await next();
