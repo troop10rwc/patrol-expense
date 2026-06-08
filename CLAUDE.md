@@ -44,3 +44,28 @@ npm run deploy              # build + wrangler deploy (production)
   local `people` table; guests are `source='local'`.
 - Secrets live in `.dev.vars` (gitignored) / `wrangler secret` — never commit them.
 - Run `npm run typecheck` before committing.
+
+## Shared stack: @troop10rwc/kit
+
+This app is built on the shared Troop 10 RWC stack (Vite + React 19 + Hono +
+Cloudflare Workers + D1, behind Cloudflare Access). **Reuse the kit — don't
+reinvent UI, types, or Worker auth.**
+
+- `@troop10rwc/ui` — back-office components + `--t10-*` design tokens. Building
+  any back-office page? Follow the design contract at
+  `node_modules/@troop10rwc/ui/STYLE.md` (the five interaction models; one primary
+  action per view; preview any write the user didn't type field-by-field). To use
+  it, import `@troop10rwc/ui/fonts.css` then `@troop10rwc/ui/theme.css` in
+  `src/client/main.tsx` (order matters) — not wired yet; add when you adopt the UI.
+- `@troop10rwc/shared` — shared types (`Role`, `Position`, `Changeset`). Import
+  contracts from here; don't redefine them. (This repo still has a local
+  `src/shared` — migrating it onto the kit is a separate change.)
+- `@troop10rwc/worker-kit` — Access JWT verify, roster role, Hono middleware
+  (`withAuth`, `requireLeader`). This repo's `src/worker/auth.ts` + `roster.ts` are
+  the local versions worker-kit is meant to absorb — migrate deliberately.
+
+Install/auth uses GitHub Packages — see `.npmrc` (`NPM_TOKEN` = `GITHUB_TOKEN` in
+CI, a PAT locally). Canonical docs: https://github.com/troop10rwc/kit/blob/main/STACK.md
+
+Agents: the kit ships a Claude Code plugin (auto-loaded via `.claude/settings.json`)
+with skills `consume-kit` (repo prep) and `backoffice-style` (the design contract).

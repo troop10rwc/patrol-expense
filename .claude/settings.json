@@ -1,0 +1,6 @@
+{
+  "extraKnownMarketplaces": {
+    "troop10rwc": { "source": { "source": "github", "repo": "troop10rwc/kit" } }
+  },
+  "enabledPlugins": { "troop10-kit@troop10rwc": true }
+}
