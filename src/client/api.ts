@@ -1,4 +1,4 @@
-import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot } from "../shared/types.ts";
+import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot, ImportPreview } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
@@ -89,6 +89,15 @@ export const api = {
   deleteSnapshot: (sid: number) => req<{ ok: true }>(`/api/snapshots/${sid}`, { method: "DELETE" }),
   getChanges: (tripId: number) =>
     req<{ since: SnapshotMeta | null; diff: BundleDiff | null }>(`/api/trips/${tripId}/changes`),
+
+  // ---- Google Sheet import (preview -> commit) ----
+  importPreview: (sheetUrl: string) =>
+    req<ImportPreview>("/api/import/preview", { method: "POST", body: JSON.stringify({ sheetUrl }) }),
+  importCommit: (preview: ImportPreview) =>
+    req<{ tripId: number; snapshotId: number; bundle: TripBundle }>("/api/import/commit", {
+      method: "POST",
+      body: JSON.stringify({ preview }),
+    }),
 
   geoAutocomplete: (q: string) =>
     req<{ description: string }[]>(`/api/geo/autocomplete?q=${encodeURIComponent(q)}`),

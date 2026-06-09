@@ -10,6 +10,7 @@ import type {
   PersonType,
   SnapshotMeta,
   Snapshot,
+  ImportPreview,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
@@ -110,6 +111,7 @@ function IndexPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   useEffect(() => {
     api.getSummary().then(setSummaries).catch((e) => { setError(String(e)); setSummaries([]); });
@@ -143,12 +145,16 @@ function IndexPage() {
           <h1>Patrol Expense</h1>
           <div className="meta"><span>Troop trip expense sheets</span></div>
         </div>
-        <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
+        <div className="row">
+          <button className="btn ghost" onClick={() => setShowImport(true)}>Import from Google Sheet</button>
+          <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
+        </div>
       </header>
 
       {error && <div className="err">{error}</div>}
 
       {showNew && <NewTripModal onClose={() => setShowNew(false)} onCreate={createTrip} />}
+      {showImport && <ImportModal onClose={() => setShowImport(false)} />}
 
       {summaries.length === 0 ? (
         <div className="card">
@@ -262,6 +268,239 @@ function NewTripModal({
             {busy ? "Creating…" : "Create trip"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Import an ad-hoc expense Google Sheet into a new trip. Two steps: paste a
+// link to get a preview (with inline flags for broken formulas / mismatched
+// totals / unknown payers), fix anything flagged, then commit. The commit
+// creates the trip and an "Import baseline" snapshot.
+function ImportModal({ onClose }: { onClose: () => void }) {
+  const [url, setUrl] = useState("");
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const nameOf = (ref: string) => preview?.people.find((p) => p.ref === ref)?.displayName ?? ref;
+
+  async function runPreview() {
+    if (!url.trim() || busy) return;
+    setBusy(true); setError(null);
+    try {
+      setPreview(await api.importPreview(url.trim()));
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+
+  function setPayer(groupName: string, idx: number, payerRef: string) {
+    setPreview((prev) => prev && {
+      ...prev,
+      expenseGroups: prev.expenseGroups.map((g) =>
+        g.name === groupName
+          ? { ...g, receipts: g.receipts.map((r, i) => (i === idx ? { ...r, payerRef: payerRef || null } : r)) }
+          : g),
+    });
+  }
+
+  function setResolution(ref: string, value: string) {
+    setPreview((prev) => prev && {
+      ...prev,
+      people: prev.people.map((p) =>
+        p.ref === ref
+          ? { ...p, resolution: value === "guest" ? { kind: "guest" } : { kind: "roster", bsa_number: value.slice(4) } }
+          : p),
+    });
+  }
+
+  const blockingCount = preview
+    ? preview.expenseGroups.reduce((n, g) => n + g.receipts.filter((r) => r.amount > 0 && !r.payerRef).length, 0)
+    : 0;
+
+  async function commit() {
+    if (!preview || busy || blockingCount) return;
+    setBusy(true); setError(null);
+    try {
+      const { bundle } = await api.importCommit(preview);
+      location.href = appHref(`/${bundle.trip.uuid}/${bundle.trip.slug}#reimbursement`);
+    } catch (e) { setError(String(e)); setBusy(false); }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal import-modal" onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ marginTop: 0 }}>Import from Google Sheet</h2>
+        {error && <div className="err">{error}</div>}
+
+        {!preview ? (
+          <>
+            <p className="hint" style={{ marginTop: 0 }}>
+              Paste a shareable link to an expense-report sheet. It must be shared
+              “Anyone with the link”. We’ll show a preview and flag any problems
+              before importing.
+            </p>
+            <label className="fld" style={{ marginBottom: 16 }}>Google Sheet link <span className="req">*</span>
+              <input
+                autoFocus value={url} disabled={busy} inputMode="url"
+                placeholder="https://docs.google.com/spreadsheets/d/…"
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") runPreview(); }}
+              />
+            </label>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
+              <button className="btn" disabled={busy || !url.trim()} onClick={runPreview}>
+                {busy ? "Reading…" : "Preview import"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="card" style={{ marginBottom: 12 }}>
+              <strong>{preview.trip.name}</strong>
+              <div className="meta">
+                <span>{preview.trip.trip_date ?? "no date"}</span>
+                {preview.trip.planning_doc_url && (
+                  <a href={preview.trip.planning_doc_url} target="_blank" rel="noreferrer">Doc ↗</a>
+                )}
+              </div>
+            </div>
+
+            {preview.flags.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Detected issues</h3>
+                <ul className="import-flags">
+                  {preview.flags.map((f, i) => (
+                    <li key={i}><span className={`pill flag-${f.severity}`}>{f.severity}</span> {f.message}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="card" style={{ marginBottom: 12 }}>
+              <h3 style={{ marginTop: 0 }}>Expenses by group</h3>
+              <p className="hint" style={{ marginTop: 0 }}>
+                Receipts and payers come straight from each patrol/unit tab. Choose a payer for any receipt that’s missing one.
+              </p>
+              {preview.expenseGroups.map((g) => (
+                <div key={g.name} style={{ marginBottom: 12 }}>
+                  <div><strong>{g.name}</strong> <span className="hint">· {g.memberRefs.length} attending · {money(g.total)}</span></div>
+                  <table className="trips">
+                    <tbody>
+                      {g.receipts.length === 0 && <tr><td className="hint" colSpan={3}>No receipts on this tab.</td></tr>}
+                      {g.receipts.map((rc, i) => (
+                        <tr key={i}>
+                          <td>{rc.description}</td>
+                          <td className="num">{money(rc.amount)}</td>
+                          <td>
+                            <select
+                              value={rc.payerRef ?? ""}
+                              className={rc.amount > 0 && !rc.payerRef ? "needs" : ""}
+                              onChange={(e) => setPayer(g.name, i, e.target.value)}
+                            >
+                              <option value="">— choose payer —</option>
+                              {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+
+            {preview.travelGroups.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Travel</h3>
+                <table className="trips">
+                  <thead><tr><th>Route</th><th>From → To</th><th className="num">Round trip</th><th className="num">Drivers</th><th className="num">$/driver</th></tr></thead>
+                  <tbody>
+                    {preview.travelGroups.map((t) => (
+                      <tr key={t.name}>
+                        <td>{t.name}</td>
+                        <td className="hint">{(t.origin ?? "?").split(",")[0]} → {(t.destination ?? "?").split(",")[0]}</td>
+                        <td className="num">{t.roundTripMiles != null ? `${t.roundTripMiles} mi` : "—"}</td>
+                        <td className="num">{t.driverRefs.length}</td>
+                        <td className="num">{money(t.reimbursementPerDriver)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {preview.prepayments.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Pre-reimbursed</h3>
+                <table className="trips">
+                  <tbody>
+                    {preview.prepayments.map((pp, i) => (
+                      <tr key={i}><td>{nameOf(pp.personRef)}</td><td className="num">{money(pp.amount)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {preview.summary.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Summary-tab check</h3>
+                <p className="hint" style={{ marginTop: 0 }}>
+                  Each person’s “Total Owed” on the Summary tab vs. the sum of its own line items. Red = the sheet shows a broken/mis-formatted value.
+                </p>
+                <table className="trips">
+                  <thead><tr><th>Person</th><th className="num">Summary shows</th><th className="num">Line items sum</th><th></th></tr></thead>
+                  <tbody>
+                    {preview.summary.map((s, i) => {
+                      const ok = s.parsedValue != null && Math.abs(s.parsedValue - s.recomputed) < 0.005;
+                      return (
+                        <tr key={i}>
+                          <td>{nameOf(s.personRef)}</td>
+                          <td className="num">
+                            {s.parsedValue == null ? <span className="flag-bad">{s.rawValue || "—"}</span> : money(s.parsedValue)}
+                          </td>
+                          <td className="num">{money(s.recomputed)}</td>
+                          <td>{ok ? <span className="pill">✓</span> : <span className="pill flag-warning">check</span>}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {preview.people.some((p) => p.rosterCandidates) && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Resolve people</h3>
+                {preview.people.filter((p) => p.rosterCandidates).map((p) => (
+                  <label key={p.ref} className="fld" style={{ marginBottom: 8 }}>{p.displayName} (…{p.code})
+                    <select
+                      value={p.resolution.kind === "roster" ? `bsa:${p.resolution.bsa_number}` : "guest"}
+                      onChange={(e) => setResolution(p.ref, e.target.value)}
+                    >
+                      <option value="guest">Local guest</option>
+                      {p.rosterCandidates!.map((c) => (
+                        <option key={c.bsa_number} value={`bsa:${c.bsa_number}`}>{c.name} ({c.bsa_number})</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <button className="btn ghost" disabled={busy} onClick={() => setPreview(null)}>← Back</button>
+              <div className="row">
+                <button className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
+                <button className="btn" disabled={busy || blockingCount > 0} onClick={commit}>
+                  {busy ? "Importing…" : blockingCount ? `Choose ${blockingCount} payer(s)` : "Import as new trip"}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

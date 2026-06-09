@@ -149,6 +149,108 @@ export interface Snapshot extends SnapshotMeta {
   bundle: TripBundle;
 }
 
+// ----- Google Sheet import -----
+// A two-step (preview -> commit) import of an expense-report Google Sheet into a
+// new trip. The workbook's per-area tabs (UnitOverall, PatrolPatrolN, Travel*)
+// carry the real receipts (with payer), attendance, and travel routes; we map
+// those straight onto the app's model and cross-check the derived per-person
+// owed against the Summary tab to flag missed-formula errors. All surfaced
+// inline in the preview before any write.
+
+export type ImportFlagKind =
+  | "broken_formula" // a Summary "Total Owed" cell didn't parse as currency (e.g. "2408%")
+  | "summary_mismatch" // Summary total != sum of the Summary's own line items
+  | "unmatched_person" // no roster match -> will become a local guest
+  | "ambiguous_person" // >1 roster member shares this last-4 BSA suffix
+  | "payer_unknown"; // a receipt row had no payer
+
+export type ImportFlagSeverity = "blocking" | "warning" | "info";
+
+export interface ImportFlag {
+  kind: ImportFlagKind;
+  severity: ImportFlagSeverity;
+  message: string;
+  groupName?: string; // anchor: the cost group this flag is about
+  personRef?: string; // anchor: ImportPerson.ref this flag is about
+  expected?: number; // dollars we recomputed
+  found?: number | null; // dollars the sheet showed (null if unparseable)
+  rawValue?: string; // the raw cell text, e.g. "2408%"
+}
+
+export type ImportPersonResolution =
+  | { kind: "roster"; bsa_number: string } // matched a roster member
+  | { kind: "guest" }; // create a local guest
+
+export interface ImportPerson {
+  ref: string; // stable key within this preview (e.g. "p0")
+  rawName: string; // the sheet cell text, e.g. "Diane Sweet (3143)"
+  displayName: string; // "Diane Sweet"
+  code: string | null; // "3143" (last-4 of BSA), or null
+  type: PersonType; // best guess; roster people get the real type at commit
+  resolution: ImportPersonResolution;
+  rosterCandidates?: { bsa_number: string; name: string }[]; // for the ambiguous case
+}
+
+export interface ImportReceipt {
+  description: string; // e.g. "Safeway"
+  amount: number;
+  payerRef: string | null; // null => payer_unknown (blocking until the leader picks)
+}
+
+export interface ImportExpenseGroup {
+  name: string; // "Unit:Overall", "Patrol:Patrol1", …
+  kind: "unit" | "patrol";
+  receipts: ImportReceipt[]; // real receipts read from the tab (payer included)
+  memberRefs: string[]; // attendance (Patrol Members column)
+  total: number; // sum of receipts
+}
+
+export interface ImportTravelGroup {
+  name: string; // "Travel:Primary"
+  origin: string | null;
+  destination: string | null;
+  oneWayMiles: number | null;
+  roundTripMiles: number | null;
+  tolls: number;
+  rateOverride: number | null; // null when the tab's rate equals the trip rate
+  driverRefs: string[];
+  chargesTo: string | null; // name of the unit group the reimbursements charge to
+  reimbursementPerDriver: number; // informational (from the tab)
+}
+
+export interface ImportPrepayment {
+  personRef: string;
+  amount: number;
+  note: string;
+}
+
+export interface ImportSummaryRow {
+  personRef: string;
+  rawValue: string; // sheet cell text, e.g. "2408%" or "$236.36"
+  parsedValue: number | null; // best-effort currency parse; null if broken
+  recomputed: number; // sum of this person's owed line items on the Summary tab
+}
+
+export interface ImportTripMeta {
+  name: string;
+  trip_date: string | null; // raw text (e.g. "Apr 24-26"); not parsed to ISO
+  planning_doc_url: string | null;
+  rosterUnits: string[]; // units the people were resolved against
+  mileage_rate: number; // from the Travel tabs' rate (default 0.28)
+}
+
+export interface ImportPreview {
+  sheetId: string;
+  sheetUrl: string;
+  trip: ImportTripMeta;
+  people: ImportPerson[];
+  expenseGroups: ImportExpenseGroup[];
+  travelGroups: ImportTravelGroup[];
+  prepayments: ImportPrepayment[];
+  summary: ImportSummaryRow[];
+  flags: ImportFlag[];
+}
+
 /** Lightweight per-trip rollup for the index page. */
 export interface TripSummary {
   trip: Trip;
