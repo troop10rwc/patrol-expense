@@ -58,15 +58,18 @@ export function xlsxExportUrl(id: string): string {
 }
 
 /**
- * Parse a currency cell to a number, or `null` if it isn't sane currency.
- * Critically rejects the "missed formula" case (e.g. "2408%") so it becomes a
- * flag rather than silently importing a wrong number.
+ * Parse a currency cell to a number, or `null` if it isn't a number at all.
+ * A trailing "%" is a formatting bug in these sheets — the underlying value is a
+ * decimal (e.g. "2408%" -> 24.08), so we convert it rather than reject it.
  */
 export function parseCurrency(raw: string): number | null {
-  const s = (raw ?? "").trim();
-  if (!s || s.endsWith("%")) return null;
+  let s = (raw ?? "").trim();
+  if (!s) return null;
+  const percent = s.endsWith("%");
+  if (percent) s = s.slice(0, -1);
   const cleaned = s.replace(/[$,\s]/g, "");
   if (!/^-?\d*\.?\d+$/.test(cleaned)) return null;
   const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
+  if (!Number.isFinite(n)) return null;
+  return percent ? n / 100 : n;
 }
