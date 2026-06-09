@@ -376,26 +376,48 @@ function ImportModal({ onClose }: { onClose: () => void }) {
 
             <div className="card" style={{ marginBottom: 12 }}>
               <h3 style={{ marginTop: 0 }}>Groups &amp; receipts</h3>
+              <p className="hint" style={{ marginTop: 0 }}>
+                Each total is the sum of the per-person amounts in that group on the sheet — expand a total to see the breakdown.
+                Amounts in red don’t fit the even split (likely a receipt typed into the owed column).
+              </p>
               <table className="trips">
                 <thead><tr><th>Group</th><th className="num">Total</th><th className="num">People</th><th>Paid by</th></tr></thead>
                 <tbody>
-                  {preview.groups.map((g) => (
-                    <tr key={g.name}>
-                      <td>{g.name}</td>
-                      <td className="num">{money(g.total)}</td>
-                      <td className="num hint">{g.lineItems.length}</td>
-                      <td>
-                        <select
-                          value={g.receipt.payerRef ?? ""}
-                          className={g.receipt.amount > 0 && !g.receipt.payerRef ? "needs" : ""}
-                          onChange={(e) => setPayer(g.name, e.target.value)}
-                        >
-                          <option value="">— choose payer —</option>
-                          {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
+                  {preview.groups.map((g) => {
+                    const positives = g.lineItems.map((li) => li.owed).filter((v) => v > 0);
+                    const perShare = positives.length ? Math.min(...positives) : 0;
+                    const isOutlier = (owed: number) =>
+                      perShare > 0 && owed > 0 && Math.abs(owed / perShare - Math.round(owed / perShare)) > 0.02;
+                    return (
+                      <tr key={g.name}>
+                        <td>{g.name}</td>
+                        <td className="num">
+                          <details className="import-breakdown">
+                            <summary>{money(g.total)}</summary>
+                            <ul>
+                              {g.lineItems.map((li, i) => (
+                                <li key={i} className={isOutlier(li.owed) ? "flag-bad" : undefined}
+                                  title={isOutlier(li.owed) ? "Doesn't fit the even split — likely a receipt, not a share" : undefined}>
+                                  <span>{nameOf(li.personRef)}</span><span>{money(li.owed)}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        </td>
+                        <td className="num hint">{g.lineItems.length}</td>
+                        <td>
+                          <select
+                            value={g.receipt.payerRef ?? ""}
+                            className={g.receipt.amount > 0 && !g.receipt.payerRef ? "needs" : ""}
+                            onChange={(e) => setPayer(g.name, e.target.value)}
+                          >
+                            <option value="">— choose payer —</option>
+                            {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
+                          </select>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
