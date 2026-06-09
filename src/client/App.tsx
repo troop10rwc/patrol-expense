@@ -294,11 +294,13 @@ function ImportModal({ onClose }: { onClose: () => void }) {
     finally { setBusy(false); }
   }
 
-  function setPayer(groupName: string, payerRef: string) {
+  function setPayer(groupName: string, idx: number, payerRef: string) {
     setPreview((prev) => prev && {
       ...prev,
-      groups: prev.groups.map((g) =>
-        g.name === groupName ? { ...g, receipt: { ...g.receipt, payerRef: payerRef || null } } : g),
+      expenseGroups: prev.expenseGroups.map((g) =>
+        g.name === groupName
+          ? { ...g, receipts: g.receipts.map((r, i) => (i === idx ? { ...r, payerRef: payerRef || null } : r)) }
+          : g),
     });
   }
 
@@ -312,10 +314,12 @@ function ImportModal({ onClose }: { onClose: () => void }) {
     });
   }
 
-  const blocking = preview ? preview.groups.filter((g) => g.receipt.amount > 0 && !g.receipt.payerRef) : [];
+  const blockingCount = preview
+    ? preview.expenseGroups.reduce((n, g) => n + g.receipts.filter((r) => r.amount > 0 && !r.payerRef).length, 0)
+    : 0;
 
   async function commit() {
-    if (!preview || busy || blocking.length) return;
+    if (!preview || busy || blockingCount) return;
     setBusy(true); setError(null);
     try {
       const { bundle } = await api.importCommit(preview);
@@ -375,74 +379,97 @@ function ImportModal({ onClose }: { onClose: () => void }) {
             )}
 
             <div className="card" style={{ marginBottom: 12 }}>
-              <h3 style={{ marginTop: 0 }}>Groups &amp; receipts</h3>
+              <h3 style={{ marginTop: 0 }}>Expenses by group</h3>
               <p className="hint" style={{ marginTop: 0 }}>
-                Each total is the sum of the per-person amounts in that group on the sheet — expand a total to see the breakdown.
-                Amounts in red don’t fit the even split (likely a receipt typed into the owed column).
+                Receipts and payers come straight from each patrol/unit tab. Choose a payer for any receipt that’s missing one.
               </p>
-              <table className="trips">
-                <thead><tr><th>Group</th><th className="num">Total</th><th className="num">People</th><th>Paid by</th></tr></thead>
-                <tbody>
-                  {preview.groups.map((g) => {
-                    const positives = g.lineItems.map((li) => li.owed).filter((v) => v > 0);
-                    const perShare = positives.length ? Math.min(...positives) : 0;
-                    const isOutlier = (owed: number) =>
-                      perShare > 0 && owed > 0 && Math.abs(owed / perShare - Math.round(owed / perShare)) > 0.02;
-                    return (
-                      <tr key={g.name}>
-                        <td>{g.name}</td>
-                        <td className="num">
-                          <details className="import-breakdown">
-                            <summary>{money(g.total)}</summary>
-                            <ul>
-                              {g.lineItems.map((li, i) => (
-                                <li key={i} className={isOutlier(li.owed) ? "flag-bad" : undefined}
-                                  title={isOutlier(li.owed) ? "Doesn't fit the even split — likely a receipt, not a share" : undefined}>
-                                  <span>{nameOf(li.personRef)}</span><span>{money(li.owed)}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </details>
-                        </td>
-                        <td className="num hint">{g.lineItems.length}</td>
-                        <td>
-                          <select
-                            value={g.receipt.payerRef ?? ""}
-                            className={g.receipt.amount > 0 && !g.receipt.payerRef ? "needs" : ""}
-                            onChange={(e) => setPayer(g.name, e.target.value)}
-                          >
-                            <option value="">— choose payer —</option>
-                            {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
-                          </select>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              {preview.expenseGroups.map((g) => (
+                <div key={g.name} style={{ marginBottom: 12 }}>
+                  <div><strong>{g.name}</strong> <span className="hint">· {g.memberRefs.length} attending · {money(g.total)}</span></div>
+                  <table className="trips">
+                    <tbody>
+                      {g.receipts.length === 0 && <tr><td className="hint" colSpan={3}>No receipts on this tab.</td></tr>}
+                      {g.receipts.map((rc, i) => (
+                        <tr key={i}>
+                          <td>{rc.description}</td>
+                          <td className="num">{money(rc.amount)}</td>
+                          <td>
+                            <select
+                              value={rc.payerRef ?? ""}
+                              className={rc.amount > 0 && !rc.payerRef ? "needs" : ""}
+                              onChange={(e) => setPayer(g.name, i, e.target.value)}
+                            >
+                              <option value="">— choose payer —</option>
+                              {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
             </div>
 
-            <div className="card" style={{ marginBottom: 12 }}>
-              <h3 style={{ marginTop: 0 }}>Total-owed check</h3>
-              <table className="trips">
-                <thead><tr><th>Person</th><th className="num">Sheet</th><th className="num">Recomputed</th><th></th></tr></thead>
-                <tbody>
-                  {preview.summary.map((s, i) => {
-                    const ok = s.parsedValue != null && Math.abs(s.parsedValue - s.recomputed) < 0.005;
-                    return (
-                      <tr key={i}>
-                        <td>{nameOf(s.personRef)}</td>
-                        <td className="num">
-                          {s.parsedValue == null ? <span className="flag-bad">{s.rawValue || "—"}</span> : money(s.parsedValue)}
-                        </td>
-                        <td className="num">{money(s.recomputed)}</td>
-                        <td>{ok ? <span className="pill">✓</span> : <span className="pill flag-warning">check</span>}</td>
+            {preview.travelGroups.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Travel</h3>
+                <table className="trips">
+                  <thead><tr><th>Route</th><th>From → To</th><th className="num">Round trip</th><th className="num">Drivers</th><th className="num">$/driver</th></tr></thead>
+                  <tbody>
+                    {preview.travelGroups.map((t) => (
+                      <tr key={t.name}>
+                        <td>{t.name}</td>
+                        <td className="hint">{(t.origin ?? "?").split(",")[0]} → {(t.destination ?? "?").split(",")[0]}</td>
+                        <td className="num">{t.roundTripMiles != null ? `${t.roundTripMiles} mi` : "—"}</td>
+                        <td className="num">{t.driverRefs.length}</td>
+                        <td className="num">{money(t.reimbursementPerDriver)}</td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {preview.prepayments.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Pre-reimbursed</h3>
+                <table className="trips">
+                  <tbody>
+                    {preview.prepayments.map((pp, i) => (
+                      <tr key={i}><td>{nameOf(pp.personRef)}</td><td className="num">{money(pp.amount)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {preview.summary.length > 0 && (
+              <div className="card" style={{ marginBottom: 12 }}>
+                <h3 style={{ marginTop: 0 }}>Summary-tab check</h3>
+                <p className="hint" style={{ marginTop: 0 }}>
+                  Each person’s “Total Owed” on the Summary tab vs. the sum of its own line items. Red = the sheet shows a broken/mis-formatted value.
+                </p>
+                <table className="trips">
+                  <thead><tr><th>Person</th><th className="num">Summary shows</th><th className="num">Line items sum</th><th></th></tr></thead>
+                  <tbody>
+                    {preview.summary.map((s, i) => {
+                      const ok = s.parsedValue != null && Math.abs(s.parsedValue - s.recomputed) < 0.005;
+                      return (
+                        <tr key={i}>
+                          <td>{nameOf(s.personRef)}</td>
+                          <td className="num">
+                            {s.parsedValue == null ? <span className="flag-bad">{s.rawValue || "—"}</span> : money(s.parsedValue)}
+                          </td>
+                          <td className="num">{money(s.recomputed)}</td>
+                          <td>{ok ? <span className="pill">✓</span> : <span className="pill flag-warning">check</span>}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
 
             {preview.people.some((p) => p.rosterCandidates) && (
               <div className="card" style={{ marginBottom: 12 }}>
@@ -467,8 +494,8 @@ function ImportModal({ onClose }: { onClose: () => void }) {
               <button className="btn ghost" disabled={busy} onClick={() => setPreview(null)}>← Back</button>
               <div className="row">
                 <button className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
-                <button className="btn" disabled={busy || blocking.length > 0} onClick={commit}>
-                  {busy ? "Importing…" : blocking.length ? `Choose ${blocking.length} payer(s)` : "Import as new trip"}
+                <button className="btn" disabled={busy || blockingCount > 0} onClick={commit}>
+                  {busy ? "Importing…" : blockingCount ? `Choose ${blockingCount} payer(s)` : "Import as new trip"}
                 </button>
               </div>
             </div>

@@ -4,7 +4,8 @@ import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
 import { fetchRoster } from "./roster.ts";
-import { parseCsv, extractSheetId, csvExportUrl } from "./csv.ts";
+import { parseCsv, extractSheetId, csvExportUrl, xlsxExportUrl } from "./csv.ts";
+import { parseXlsxTabs } from "./xlsx.ts";
 import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
@@ -471,31 +472,39 @@ api.get("/geo/distance", async (c) => {
 });
 
 // ---- import a Google Sheet expense report ----
-// Step 1: fetch + parse the sheet and return a preview with inline flags. No
-// writes. The sheet must be shared "Anyone with the link" (we use the public
-// CSV export).
+// Step 1: fetch + parse the whole workbook and return a preview with inline
+// flags. No writes. The sheet must be shared "Anyone with the link" (we use the
+// public xlsx + csv exports). The per-area tabs hold the real receipts/members/
+// travel; the Summary CSV (formatted) drives the missed-formula cross-check.
 api.post("/import/preview", async (c) => {
   const b = await c.req.json<{ sheetUrl?: string }>().catch(() => ({ sheetUrl: undefined }));
   if (!b.sheetUrl) return c.json(bad("sheetUrl is required"), 400);
   const id = extractSheetId(b.sheetUrl);
   if (!id) return c.json(bad("couldn't find a Google Sheet id in that URL"), 400);
 
-  let text: string;
+  let tabs: { name: string; rows: string[][] }[];
+  let summaryCsv: string[][] | null = null;
   try {
-    const res = await fetch(csvExportUrl(id), { redirect: "follow" });
+    const res = await fetch(xlsxExportUrl(id), { redirect: "follow" });
     const ct = res.headers.get("content-type") ?? "";
     if (!res.ok || ct.includes("text/html")) {
       return c.json(bad("sheet isn't publicly accessible — set sharing to 'Anyone with the link'"), 502);
     }
-    text = await res.text();
+    tabs = await parseXlsxTabs(await res.arrayBuffer());
   } catch (e) {
-    return c.json(bad(`failed to fetch the sheet: ${String(e)}`), 502);
+    return c.json(bad(`failed to read the sheet: ${String(e)}`), 502);
   }
+  // Formatted first-tab CSV reveals broken-display cells (e.g. "2408%").
+  try {
+    const csvRes = await fetch(csvExportUrl(id), { redirect: "follow" });
+    if (csvRes.ok && !(csvRes.headers.get("content-type") ?? "").includes("text/html")) {
+      summaryCsv = parseCsv(await csvRes.text());
+    }
+  } catch { /* cross-check is best-effort */ }
 
-  const rows = parseCsv(text);
   const roster = await fetchRoster(c.env.ROSTER, DEFAULT_UNITS);
   try {
-    return c.json(buildPreview(rows, roster, b.sheetUrl, id, DEFAULT_UNITS));
+    return c.json(buildPreview(tabs, summaryCsv, roster, b.sheetUrl, id, DEFAULT_UNITS));
   } catch (e) {
     return c.json(bad(`couldn't parse the sheet: ${String(e)}`), 400);
   }
@@ -509,9 +518,10 @@ api.post("/import/commit", async (c) => {
   const preview = b.preview;
   if (!preview) return c.json(bad("preview is required"), 400);
 
-  const unresolved = preview.groups.filter((g) => g.receipt.amount > 0 && !g.receipt.payerRef);
-  if (unresolved.length) {
-    return c.json({ error: "choose a payer for every group before importing", groups: unresolved.map((g) => g.name) }, 409);
+  const noPayer = preview.expenseGroups.flatMap((g) =>
+    g.receipts.filter((r) => r.amount > 0 && !r.payerRef).map((r) => `${g.name}: ${r.description}`));
+  if (noPayer.length) {
+    return c.json({ error: "choose a payer for every receipt before importing", receipts: noPayer }, 409);
   }
 
   const uuid = crypto.randomUUID();
@@ -525,18 +535,7 @@ api.post("/import/commit", async (c) => {
   const tripId = tripRes.meta.last_row_id;
 
   try {
-    // Cost groups, unit first (travel/patrol reference order doesn't matter here).
-    const ordered = [...preview.groups].sort((a, b) => Number(b.kind === "unit") - Number(a.kind === "unit"));
-    const groupId = new Map<string, number>();
-    let sort = 0;
-    for (const g of ordered) {
-      const r = await c.env.DB.prepare(
-        "INSERT INTO cost_groups (trip_id, name, kind, sort_order) VALUES (?, ?, ?, ?)",
-      ).bind(tripId, g.name, g.kind, sort++).run();
-      groupId.set(g.name, r.meta.last_row_id);
-    }
-
-    // People: roster members are projected (with guardians); guests are local.
+    // People first: roster members are projected (with guardians); guests local.
     const personId = new Map<string, number>();
     for (const p of preview.people) {
       if (p.resolution.kind === "roster") {
@@ -549,24 +548,47 @@ api.post("/import/commit", async (c) => {
       }
     }
 
-    // Membership (attendance) per group.
-    for (const g of preview.groups) {
-      const gid = groupId.get(g.name)!;
-      const ids = [...new Set(g.lineItems.map((li) => personId.get(li.personRef)).filter((x): x is number => x != null))];
-      if (ids.length) {
-        await c.env.DB.batch(ids.map((pid) =>
+    // Expense groups (unit first so travel can reference it), then their
+    // members and real receipts.
+    const groupId = new Map<string, number>();
+    const ordered = [...preview.expenseGroups].sort((a, b) => Number(b.kind === "unit") - Number(a.kind === "unit"));
+    let sort = 0;
+    for (const g of ordered) {
+      const r = await c.env.DB.prepare(
+        "INSERT INTO cost_groups (trip_id, name, kind, sort_order) VALUES (?, ?, ?, ?)",
+      ).bind(tripId, g.name, g.kind, sort++).run();
+      const gid = r.meta.last_row_id;
+      groupId.set(g.name, gid);
+      const memberIds = [...new Set(g.memberRefs.map((ref) => personId.get(ref)).filter((x): x is number => x != null))];
+      if (memberIds.length) {
+        await c.env.DB.batch(memberIds.map((pid) =>
           c.env.DB.prepare("INSERT INTO group_members (group_id, person_id) VALUES (?, ?)").bind(gid, pid)));
+      }
+      for (const rc of g.receipts) {
+        if (rc.amount <= 0) continue;
+        const payer = personId.get(rc.payerRef!);
+        if (payer == null) throw new Error(`payer for ${g.name}/${rc.description} not resolved`);
+        await c.env.DB.prepare(
+          "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
+        ).bind(tripId, gid, rc.description, rc.amount, payer).run();
       }
     }
 
-    // One reconstructed receipt per group, paid by the chosen payer.
-    for (const g of preview.groups) {
-      if (g.receipt.amount <= 0) continue;
-      const payer = personId.get(g.receipt.payerRef!);
-      if (payer == null) throw new Error(`payer for ${g.name} not resolved`);
-      await c.env.DB.prepare(
-        "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
-      ).bind(tripId, groupId.get(g.name)!, g.receipt.description, g.receipt.amount, payer).run();
+    // Travel groups: route + rate (charged to the unit group), drivers, then
+    // materialize the per-driver reimbursements via the engine.
+    let travelSort = 100;
+    for (const t of preview.travelGroups) {
+      const chargeTo = t.chargesTo ? groupId.get(t.chargesTo) ?? null : null;
+      const r = await c.env.DB.prepare(
+        "INSERT INTO cost_groups (trip_id, name, kind, sort_order, origin, destination, one_way_miles, round_trip_miles, tolls, rate_override, cost_group_id) VALUES (?, ?, 'travel', ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(tripId, t.name, travelSort++, t.origin, t.destination, t.oneWayMiles, t.roundTripMiles, t.tolls, t.rateOverride, chargeTo).run();
+      const gid = r.meta.last_row_id;
+      const driverIds = [...new Set(t.driverRefs.map((ref) => personId.get(ref)).filter((x): x is number => x != null))];
+      if (driverIds.length) {
+        await c.env.DB.batch(driverIds.map((pid) =>
+          c.env.DB.prepare("INSERT INTO travel_drivers (group_id, person_id) VALUES (?, ?)").bind(gid, pid)));
+      }
+      await regenerateTravelExpenses(c.env.DB, gid);
     }
 
     // Prepayments.

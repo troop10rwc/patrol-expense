@@ -52,6 +52,11 @@ export function csvExportUrl(id: string): string {
   return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
 }
 
+/** Public XLSX export — the whole workbook (every tab) in one file. */
+export function xlsxExportUrl(id: string): string {
+  return `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
+}
+
 /**
  * Parse a currency cell to a number, or `null` if it isn't sane currency.
  * Critically rejects the "missed formula" case (e.g. "2408%") so it becomes a

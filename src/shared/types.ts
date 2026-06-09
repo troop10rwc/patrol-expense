@@ -150,19 +150,19 @@ export interface Snapshot extends SnapshotMeta {
 }
 
 // ----- Google Sheet import -----
-// A two-step (preview -> commit) import of an ad-hoc expense Google Sheet into a
-// new trip. The sheet is in "owed-space" (what each person owes); we reconstruct
-// receipts + attendance and flag whatever doesn't reconcile, surfaced inline in
-// the preview before any write.
+// A two-step (preview -> commit) import of an expense-report Google Sheet into a
+// new trip. The workbook's per-area tabs (UnitOverall, PatrolPatrolN, Travel*)
+// carry the real receipts (with payer), attendance, and travel routes; we map
+// those straight onto the app's model and cross-check the derived per-person
+// owed against the Summary tab to flag missed-formula errors. All surfaced
+// inline in the preview before any write.
 
 export type ImportFlagKind =
-  | "broken_formula" // a summary cell didn't parse as currency (e.g. "2408%")
-  | "summary_mismatch" // recomputed total != the sheet's summary value
+  | "broken_formula" // a Summary "Total Owed" cell didn't parse as currency (e.g. "2408%")
+  | "summary_mismatch" // Summary total != sum of the Summary's own line items
   | "unmatched_person" // no roster match -> will become a local guest
   | "ambiguous_person" // >1 roster member shares this last-4 BSA suffix
-  | "payer_unknown" // a reconstructed group receipt has no inferable payer
-  | "group_unreconciled" // per-person amounts don't divide into equal shares
-  | "uneven_shares"; // a person owes an integer multiple of the base share (multi-dependent)
+  | "payer_unknown"; // a receipt row had no payer
 
 export type ImportFlagSeverity = "blocking" | "warning" | "info";
 
@@ -183,31 +183,39 @@ export type ImportPersonResolution =
 
 export interface ImportPerson {
   ref: string; // stable key within this preview (e.g. "p0")
-  rawName: string; // the sheet cell text, e.g. "Jane Doe (1234)"
-  displayName: string; // "Jane Doe"
-  code: string | null; // "1234" (last-4 of BSA), or null
+  rawName: string; // the sheet cell text, e.g. "Diane Sweet (3143)"
+  displayName: string; // "Diane Sweet"
+  code: string | null; // "3143" (last-4 of BSA), or null
   type: PersonType; // best guess; roster people get the real type at commit
   resolution: ImportPersonResolution;
   rosterCandidates?: { bsa_number: string; name: string }[]; // for the ambiguous case
 }
 
-export interface ImportLineItem {
-  personRef: string;
-  owed: number; // this person's owed amount for the group (0 if unparseable)
-}
-
 export interface ImportReceipt {
-  description: string;
-  amount: number; // = sum of the group's line items
+  description: string; // e.g. "Safeway"
+  amount: number;
   payerRef: string | null; // null => payer_unknown (blocking until the leader picks)
 }
 
 export interface ImportExpenseGroup {
   name: string; // "Unit:Overall", "Patrol:Patrol1", …
-  kind: GroupKind;
-  lineItems: ImportLineItem[];
-  total: number;
-  receipt: ImportReceipt;
+  kind: "unit" | "patrol";
+  receipts: ImportReceipt[]; // real receipts read from the tab (payer included)
+  memberRefs: string[]; // attendance (Patrol Members column)
+  total: number; // sum of receipts
+}
+
+export interface ImportTravelGroup {
+  name: string; // "Travel:Primary"
+  origin: string | null;
+  destination: string | null;
+  oneWayMiles: number | null;
+  roundTripMiles: number | null;
+  tolls: number;
+  rateOverride: number | null; // null when the tab's rate equals the trip rate
+  driverRefs: string[];
+  chargesTo: string | null; // name of the unit group the reimbursements charge to
+  reimbursementPerDriver: number; // informational (from the tab)
 }
 
 export interface ImportPrepayment {
@@ -220,7 +228,7 @@ export interface ImportSummaryRow {
   personRef: string;
   rawValue: string; // sheet cell text, e.g. "2408%" or "$236.36"
   parsedValue: number | null; // best-effort currency parse; null if broken
-  recomputed: number; // sum of this person's owed line items across groups
+  recomputed: number; // sum of this person's owed line items on the Summary tab
 }
 
 export interface ImportTripMeta {
@@ -228,7 +236,7 @@ export interface ImportTripMeta {
   trip_date: string | null; // raw text (e.g. "Apr 24-26"); not parsed to ISO
   planning_doc_url: string | null;
   rosterUnits: string[]; // units the people were resolved against
-  mileage_rate: number; // default 0.28 (sheet carries no mileage data)
+  mileage_rate: number; // from the Travel tabs' rate (default 0.28)
 }
 
 export interface ImportPreview {
@@ -236,7 +244,8 @@ export interface ImportPreview {
   sheetUrl: string;
   trip: ImportTripMeta;
   people: ImportPerson[];
-  groups: ImportExpenseGroup[];
+  expenseGroups: ImportExpenseGroup[];
+  travelGroups: ImportTravelGroup[];
   prepayments: ImportPrepayment[];
   summary: ImportSummaryRow[];
   flags: ImportFlag[];
