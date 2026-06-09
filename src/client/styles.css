@@ -267,6 +267,17 @@ small.hint, .hint { color: var(--t10-ink-soft); }
 .modal .fld input { width: 100%; }
 .modal .row { gap: 8px; }
 
+/* --------------------------------------------- Google Sheet import preview */
+.import-modal { max-width: 780px; max-height: 80vh; overflow-y: auto; }
+.import-modal .fld select { width: 100%; }
+.import-flags { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.import-flags li { font-size: var(--t10-fs-sm); color: var(--t10-ink-soft); display: flex; gap: 8px; align-items: baseline; }
+.pill.flag-blocking { color: var(--t10-clay-deep); background: var(--t10-clay-tint); }
+.pill.flag-warning { color: var(--t10-status-warn-fg); background: var(--t10-status-warn-bg, var(--t10-status-neutral-bg)); }
+.pill.flag-info { color: var(--t10-status-neutral-fg); background: var(--t10-status-neutral-bg); }
+.flag-bad { font-family: var(--t10-font-mono); color: var(--t10-clay-deep); font-weight: 600; }
+.import-modal select.needs { border-color: var(--t10-clay); background: var(--t10-clay-tint); }
+
 /* ------------------------------------------------------------ Auth / shell */
 .signin { max-width: 460px; text-align: center; padding-top: 12vh; }
 .signin h1 { font-family: var(--t10-font-display); font-weight: 800; margin-bottom: 6px; }

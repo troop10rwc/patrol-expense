@@ -1,9 +1,11 @@
 import { Hono } from "hono";
-import type { Trip, TripBundle, SnapshotMeta } from "../shared/types.ts";
+import type { Trip, TripBundle, SnapshotMeta, ImportPreview } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
-import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups } from "./db.ts";
+import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
 import { fetchRoster } from "./roster.ts";
+import { parseCsv, extractSheetId, csvExportUrl } from "./csv.ts";
+import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
@@ -34,6 +36,10 @@ api.get("/me", (c) => {
 });
 
 const bad = (msg: string) => ({ error: msg });
+
+// Roster units a freshly-imported trip resolves people against (matches the
+// seed). The new trip stores these so its roster picker keeps working.
+const DEFAULT_UNITS = ["Troop 10 F", "Crew 10"];
 
 async function bundleResponse(db: D1Database, tripId: number) {
   const bundle = await loadTripBundle(db, tripId);
@@ -461,6 +467,129 @@ api.get("/geo/distance", async (c) => {
     return c.json({ one_way_miles: oneWay, round_trip_miles: Math.round(oneWay * 2 * 10) / 10 });
   } catch (e) {
     return c.json(bad(String(e)), 502);
+  }
+});
+
+// ---- import a Google Sheet expense report ----
+// Step 1: fetch + parse the sheet and return a preview with inline flags. No
+// writes. The sheet must be shared "Anyone with the link" (we use the public
+// CSV export).
+api.post("/import/preview", async (c) => {
+  const b = await c.req.json<{ sheetUrl?: string }>().catch(() => ({ sheetUrl: undefined }));
+  if (!b.sheetUrl) return c.json(bad("sheetUrl is required"), 400);
+  const id = extractSheetId(b.sheetUrl);
+  if (!id) return c.json(bad("couldn't find a Google Sheet id in that URL"), 400);
+
+  let text: string;
+  try {
+    const res = await fetch(csvExportUrl(id), { redirect: "follow" });
+    const ct = res.headers.get("content-type") ?? "";
+    if (!res.ok || ct.includes("text/html")) {
+      return c.json(bad("sheet isn't publicly accessible — set sharing to 'Anyone with the link'"), 502);
+    }
+    text = await res.text();
+  } catch (e) {
+    return c.json(bad(`failed to fetch the sheet: ${String(e)}`), 502);
+  }
+
+  const rows = parseCsv(text);
+  const roster = await fetchRoster(c.env.ROSTER, DEFAULT_UNITS);
+  try {
+    return c.json(buildPreview(rows, roster, b.sheetUrl, id, DEFAULT_UNITS));
+  } catch (e) {
+    return c.json(bad(`couldn't parse the sheet: ${String(e)}`), 400);
+  }
+});
+
+// Step 2: commit the (leader-edited) preview to a brand-new trip, then take an
+// "Import baseline" snapshot. Trusts the edited preview but re-checks blocking
+// flags server-side.
+api.post("/import/commit", async (c) => {
+  const b = await c.req.json<{ preview?: ImportPreview }>().catch(() => ({ preview: undefined }));
+  const preview = b.preview;
+  if (!preview) return c.json(bad("preview is required"), 400);
+
+  const unresolved = preview.groups.filter((g) => g.receipt.amount > 0 && !g.receipt.payerRef);
+  if (unresolved.length) {
+    return c.json({ error: "choose a payer for every group before importing", groups: unresolved.map((g) => g.name) }, 409);
+  }
+
+  const uuid = crypto.randomUUID();
+  const name = preview.trip.name?.trim() || "Imported trip";
+  const slug = slugify(name);
+  const tripRes = await c.env.DB.prepare(
+    "INSERT INTO trips (uuid, slug, name, trip_date, planning_doc_url, mileage_rate, roster_units) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(uuid, slug, name, preview.trip.trip_date ?? null, preview.trip.planning_doc_url ?? null, preview.trip.mileage_rate ?? 0.28, JSON.stringify(preview.trip.rosterUnits ?? DEFAULT_UNITS))
+    .run();
+  const tripId = tripRes.meta.last_row_id;
+
+  try {
+    // Cost groups, unit first (travel/patrol reference order doesn't matter here).
+    const ordered = [...preview.groups].sort((a, b) => Number(b.kind === "unit") - Number(a.kind === "unit"));
+    const groupId = new Map<string, number>();
+    let sort = 0;
+    for (const g of ordered) {
+      const r = await c.env.DB.prepare(
+        "INSERT INTO cost_groups (trip_id, name, kind, sort_order) VALUES (?, ?, ?, ?)",
+      ).bind(tripId, g.name, g.kind, sort++).run();
+      groupId.set(g.name, r.meta.last_row_id);
+    }
+
+    // People: roster members are projected (with guardians); guests are local.
+    const personId = new Map<string, number>();
+    for (const p of preview.people) {
+      if (p.resolution.kind === "roster") {
+        personId.set(p.ref, await ensureLocalPerson(c.env.DB, c.env.ROSTER, tripId, p.resolution.bsa_number));
+      } else {
+        const r = await c.env.DB.prepare(
+          "INSERT INTO people (trip_id, name, code, type, source) VALUES (?, ?, ?, ?, 'local')",
+        ).bind(tripId, p.displayName || p.rawName, p.code ?? "guest", p.type).run();
+        personId.set(p.ref, r.meta.last_row_id);
+      }
+    }
+
+    // Membership (attendance) per group.
+    for (const g of preview.groups) {
+      const gid = groupId.get(g.name)!;
+      const ids = [...new Set(g.lineItems.map((li) => personId.get(li.personRef)).filter((x): x is number => x != null))];
+      if (ids.length) {
+        await c.env.DB.batch(ids.map((pid) =>
+          c.env.DB.prepare("INSERT INTO group_members (group_id, person_id) VALUES (?, ?)").bind(gid, pid)));
+      }
+    }
+
+    // One reconstructed receipt per group, paid by the chosen payer.
+    for (const g of preview.groups) {
+      if (g.receipt.amount <= 0) continue;
+      const payer = personId.get(g.receipt.payerRef!);
+      if (payer == null) throw new Error(`payer for ${g.name} not resolved`);
+      await c.env.DB.prepare(
+        "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
+      ).bind(tripId, groupId.get(g.name)!, g.receipt.description, g.receipt.amount, payer).run();
+    }
+
+    // Prepayments.
+    for (const pp of preview.prepayments) {
+      const pid = personId.get(pp.personRef);
+      if (pid == null || pp.amount <= 0) continue;
+      await c.env.DB.prepare(
+        "INSERT INTO prepayments (trip_id, person_id, amount, note) VALUES (?, ?, ?, ?)",
+      ).bind(tripId, pid, pp.amount, pp.note || "Pre-Reimbursed (imported)").run();
+    }
+
+    // Baseline snapshot: future edits diff against the as-imported state.
+    const bundle = await loadTripBundle(c.env.DB, tripId);
+    if (!bundle) throw new Error("failed to load the imported trip");
+    const snap = await c.env.DB.prepare(
+      "INSERT INTO snapshots (trip_id, label, created_by, bundle) VALUES (?, ?, ?, ?)",
+    ).bind(tripId, "Import baseline", c.get("user").email, JSON.stringify(bundle)).run();
+
+    return c.json({ tripId, snapshotId: snap.meta.last_row_id, bundle }, 201);
+  } catch (e) {
+    // Roll back the half-built trip (children cascade) before reporting.
+    await c.env.DB.prepare("DELETE FROM trips WHERE id = ?").bind(tripId).run();
+    return c.json(bad(`import failed: ${String(e)}`), 500);
   }
 });
 
