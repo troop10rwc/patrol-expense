@@ -20,6 +20,12 @@
   "routes": [
     { "pattern": "troop10rwc.org/expenses*", "zone_name": "troop10rwc.org" }
   ],
+  // Keep the *.workers.dev subdomain enabled alongside the custom route so
+  // Workers Builds can mint per-version preview URLs for PR branches
+  // (<version>-patrol-expense.<subdomain>.workers.dev). Those preview
+  // hostnames are gated by the second Access app (CF_ACCESS_AUD_PREVIEW).
+  "workers_dev": true,
+  "preview_urls": true,
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",

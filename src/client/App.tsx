@@ -44,15 +44,15 @@ export function App() {
       .catch((e) => { if (e instanceof UnauthorizedError) setMe(null); else { console.error(e); setMe(null); } });
   }, []);
 
-  if (me === undefined) return <div className="wrap">Loading…</div>;
-  if (me === null) return <NoAccess />;
+  if (me === undefined) return <div className="t10-app"><div className="wrap">Loading…</div></div>;
+  if (me === null) return <div className="t10-app"><NoAccess /></div>;
 
   const m = appPath().slice(1).match(UUID_RE);
   return (
-    <>
-      <AccountBar me={me} />
+    <div className="t10-app">
+      <TopNav me={me} />
       {m ? <TripView uuid={m[1]} /> : <IndexPage />}
-    </>
+    </div>
   );
 }
 
@@ -66,12 +66,41 @@ function NoAccess() {
   );
 }
 
-function AccountBar({ me }: { me: Me }) {
+// Cross-app product switcher shared across the Troop 10 back office. Each app is
+// mounted same-origin under its own base path (Expenses at /expenses, the gear
+// list at /gearlist), so these are plain in-page links. `active` is the app we
+// are — here, always Expenses.
+const APPS: { id: string; label: string; href: string }[] = [
+  { id: "expenses", label: "Expenses", href: BASE_PATH },
+  { id: "gearlist", label: "Gearlist", href: "/gearlist" },
+];
+const ACTIVE_APP = "expenses";
+
+function TopNav({ me }: { me: Me }) {
   return (
-    <div className="account-bar">
-      <span className="hint">Signed in as <strong>{me.name}</strong></span>
-      <a className="btn ghost sm-btn" href={logoutUrl}>Sign out</a>
-    </div>
+    <header className="appnav">
+      <div className="appnav__inner">
+        <a className="appnav__brand" href={appHref("/")}>
+          <span className="appnav__badge">T10</span>
+          <span className="appnav__brandtext">Troop 10<small>RWC Back Office</small></span>
+        </a>
+        <nav className="appnav__products" aria-label="Apps">
+          {APPS.map((a) => (
+            <a
+              key={a.id}
+              className={`appnav__product${a.id === ACTIVE_APP ? " appnav__product--active" : ""}`}
+              aria-current={a.id === ACTIVE_APP ? "page" : undefined}
+              href={a.href}
+            >
+              {a.label}
+            </a>
+          ))}
+        </nav>
+        <div className="appnav__spacer" />
+        <span className="appnav__user">Signed in as <strong>{me.name}</strong></span>
+        <a className="appnav__signout" href={logoutUrl}>Sign out</a>
+      </div>
+    </header>
   );
 }
 
@@ -163,7 +192,7 @@ function IndexPage() {
                   <td className="num">{money(s.totalCost)}</td>
                   <td className="num">
                     {s.settleTotal > 0
-                      ? <span className={s.settleDone === s.settleTotal ? "pos" : ""}>{s.settleDone}/{s.settleTotal} settled</span>
+                      ? <span className={`pill ${s.settleDone === s.settleTotal ? "pill-new" : ""}`}>{s.settleDone}/{s.settleTotal} settled</span>
                       : <span className="hint">—</span>}
                   </td>
                 </tr>
