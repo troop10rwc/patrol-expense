@@ -15,6 +15,7 @@ import type {
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
+import { BackOfficeTopNav } from "@troop10rwc/ui";
 
 type Tab = "patrols" | "travel" | "expenses" | "reimbursement" | "settings";
 const TAB_ORDER: Tab[] = ["patrols", "travel", "expenses", "reimbursement", "settings"];
@@ -51,7 +52,7 @@ export function App() {
   const m = appPath().slice(1).match(UUID_RE);
   return (
     <div className="t10-app">
-      <TopNav me={me} />
+      <BackOfficeTopNav active="expenses" user={{ name: me.name }} logoutUrl={logoutUrl} />
       {m ? <TripView uuid={m[1]} /> : <IndexPage />}
     </div>
   );
@@ -64,45 +65,6 @@ function NoAccess() {
       <p className="empty">We couldn't read your sign-in. Reload the page, or sign in again.</p>
       <a className="btn" href={logoutUrl}>Sign in again</a>
     </div>
-  );
-}
-
-// Cross-app product switcher shared across the Troop 10 back office. The whole
-// back office lives under /manage; each app is mounted same-origin under its own
-// base path beneath it (Expenses at /manage/expenses, the gear list at
-// /manage/gearlist), so these are plain in-page links. `active` is the app we
-// are — here, always Expenses.
-const APPS: { id: string; label: string; href: string }[] = [
-  { id: "expenses", label: "Expenses", href: BASE_PATH },
-  { id: "gearlist", label: "Gearlist", href: "/manage/gearlist" },
-];
-const ACTIVE_APP = "expenses";
-
-function TopNav({ me }: { me: Me }) {
-  return (
-    <header className="appnav">
-      <div className="appnav__inner">
-        <a className="appnav__brand" href={appHref("/")}>
-          <span className="appnav__badge">T10</span>
-          <span className="appnav__brandtext">Troop 10<small>RWC Back Office</small></span>
-        </a>
-        <nav className="appnav__products" aria-label="Apps">
-          {APPS.map((a) => (
-            <a
-              key={a.id}
-              className={`appnav__product${a.id === ACTIVE_APP ? " appnav__product--active" : ""}`}
-              aria-current={a.id === ACTIVE_APP ? "page" : undefined}
-              href={a.href}
-            >
-              {a.label}
-            </a>
-          ))}
-        </nav>
-        <div className="appnav__spacer" />
-        <span className="appnav__user">Signed in as <strong>{me.name}</strong></span>
-        <a className="appnav__signout" href={logoutUrl}>Sign out</a>
-      </div>
-    </header>
   );
 }
 
