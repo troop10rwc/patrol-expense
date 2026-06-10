@@ -3,14 +3,16 @@
 **patrol-expense** — a Troop 10 trip-expense tracker. One-liner: a TypeScript
 serverless app — React/Vite SPA + Hono on Cloudflare Workers, D1 (SQLite) for
 data, Cloudflare Access (Slack SSO) for auth, Google Maps for travel distances.
-Served same-origin at `troop10rwc.org/expenses`.
+Served same-origin at `troop10rwc.org/manage/expenses`.
 
 ## Runtime & hosting
 - **Cloudflare Workers** — the whole app (API + static assets) runs at the edge,
-  deployed via **Wrangler**, served at `troop10rwc.org/expenses*` (Worker route).
+  deployed via **Wrangler**, served at `troop10rwc.org/manage/expenses*` (Worker
+  route).
 - **Cloudflare Workers Static Assets** (`ASSETS` binding, single-page-application
-  fallback) serves the built frontend. The Worker owns the whole `/expenses/*`
-  subpath: strips the base prefix, routes `/api/*` to Hono, else serves assets.
+  fallback) serves the built frontend. The Worker owns the whole
+  `/manage/expenses/*` subpath: strips the base prefix, routes `/api/*` to Hono,
+  else serves assets.
 
 ## Backend
 - **Hono** (TypeScript) — HTTP framework for the Worker; REST API under `/api/*`.
@@ -26,7 +28,7 @@ Served same-origin at `troop10rwc.org/expenses`.
 ## Frontend
 - **React 19** + **Vite 6** SPA, TypeScript, hand-written CSS (no UI framework).
 - **`@cloudflare/vite-plugin`** — runs the Worker in the Workers runtime during
-  `vite dev` and produces the deploy bundle. Vite `base: "/expenses/"`.
+  `vite dev` and produces the deploy bundle. Vite `base: "/manage/expenses/"`.
 - Client routing/auth gating done manually (no router library).
 
 ## Auth
