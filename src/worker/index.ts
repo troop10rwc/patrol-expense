@@ -18,7 +18,7 @@ interface Bindings extends AuthBindings {
 type Env = { Bindings: Bindings; Variables: { user: Identity } };
 type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 
-// API routes (mounted at /api, with the /expenses prefix stripped by the
+// API routes (mounted at /api, with the /manage/expenses prefix stripped by the
 // default fetch handler below).
 const app = new Hono<Env>();
 const api = new Hono<Env>();
@@ -474,10 +474,10 @@ api.notFound((c) => c.json(bad("not found"), 404));
 
 app.route("/api", api);
 
-// The app is mounted under /expenses. This handler owns the whole subpath:
-// strip the prefix, then route /api to Hono and everything else to the static
-// assets (SPA). Assets are built with Vite base "/expenses/" but stored at
-// their root paths, so the prefix must be stripped before serving.
+// The app is mounted under /manage/expenses. This handler owns the whole
+// subpath: strip the prefix, then route /api to Hono and everything else to the
+// static assets (SPA). Assets are built with Vite base "/manage/expenses/" but
+// stored at their root paths, so the prefix must be stripped before serving.
 export default {
   async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -492,8 +492,8 @@ export default {
       return app.fetch(new Request(inner.toString(), request), env, ctx);
     }
 
-    // Assets/SPA. In dev the Vite dev server expects the "/expenses"-prefixed
-    // path; in prod the built files live at root, so the prefix is stripped.
+    // Assets/SPA. In dev the Vite dev server expects the "/manage/expenses"-
+    // prefixed path; in prod the built files live at root, so it's stripped.
     if (env.ENVIRONMENT === "development") {
       return env.ASSETS.fetch(request);
     }

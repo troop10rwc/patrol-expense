@@ -66,13 +66,14 @@ function NoAccess() {
   );
 }
 
-// Cross-app product switcher shared across the Troop 10 back office. Each app is
-// mounted same-origin under its own base path (Expenses at /expenses, the gear
-// list at /gearlist), so these are plain in-page links. `active` is the app we
+// Cross-app product switcher shared across the Troop 10 back office. The whole
+// back office lives under /manage; each app is mounted same-origin under its own
+// base path beneath it (Expenses at /manage/expenses, the gear list at
+// /manage/gearlist), so these are plain in-page links. `active` is the app we
 // are — here, always Expenses.
 const APPS: { id: string; label: string; href: string }[] = [
   { id: "expenses", label: "Expenses", href: BASE_PATH },
-  { id: "gearlist", label: "Gearlist", href: "/gearlist" },
+  { id: "gearlist", label: "Gearlist", href: "/manage/gearlist" },
 ];
 const ACTIVE_APP = "expenses";
 

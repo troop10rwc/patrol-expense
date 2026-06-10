@@ -14,11 +14,11 @@
     // preview hostnames. A JWT for either AUD is accepted (see auth.ts).
     "CF_ACCESS_AUD_PREVIEW": "16fbe4b476b6e9d9d601170b34a8c62b2a99b8f0bd846112ea1de296856c99f2"
   },
-  // Serve the app as a same-origin tab at troop10rwc.org/expenses. Requires
-  // troop10rwc.org to be a Cloudflare zone on this account (proxied DNS).
-  // Everything else on the domain falls through to the existing site.
+  // Serve the app as a same-origin tab at troop10rwc.org/manage/expenses.
+  // Requires troop10rwc.org to be a Cloudflare zone on this account (proxied
+  // DNS). Everything else on the domain falls through to the existing site.
   "routes": [
-    { "pattern": "troop10rwc.org/expenses*", "zone_name": "troop10rwc.org" }
+    { "pattern": "troop10rwc.org/manage/expenses*", "zone_name": "troop10rwc.org" }
   ],
   // Keep the *.workers.dev subdomain enabled alongside the custom route so
   // Workers Builds can mint per-version preview URLs for PR branches
@@ -29,11 +29,11 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // The app is mounted under /expenses. The Worker owns the whole subpath:
-    // it strips the prefix and serves the API, auth, and (via the ASSETS
-    // binding) the SPA — since assets are built with Vite base "/expenses/"
-    // but stored at their root paths.
-    "run_worker_first": ["/expenses/*"]
+    // The app is mounted under /manage/expenses. The Worker owns the whole
+    // subpath: it strips the prefix and serves the API, auth, and (via the
+    // ASSETS binding) the SPA — since assets are built with Vite base
+    // "/manage/expenses/" but stored at their root paths.
+    "run_worker_first": ["/manage/expenses/*"]
   },
   "d1_databases": [
     {
