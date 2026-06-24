@@ -15,9 +15,9 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@troop10rwc/shared": "^0.5.1",
-    "@troop10rwc/ui": "^0.5.1",
-    "@troop10rwc/worker-kit": "^0.5.1",
+    "@troop10rwc/shared": "^0.7.0",
+    "@troop10rwc/ui": "^0.7.0",
+    "@troop10rwc/worker-kit": "^0.7.0",
     "hono": "^4.6.14",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
