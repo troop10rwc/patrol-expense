@@ -4,15 +4,15 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "observability": { "enabled": true },
-  // Cloudflare Access (Zero Trust) protects the domain; the Worker verifies the
-  // Access JWT it injects. These identify the Access team + application.
+  // Auth is self-hosted member sessions (see src/worker/auth.ts): the shared
+  // identity service at id.troop10rwc.org mints the `__Secure-troop_session`
+  // cookie and writes to the IDDB (troop10-id) D1 below; this Worker validates
+  // the cookie there. No Cloudflare Access.
   "vars": {
     "ENVIRONMENT": "production",
-    "CF_ACCESS_TEAM_DOMAIN": "troop10rwc.cloudflareaccess.com",
-    "CF_ACCESS_AUD": "070c36323eb0321ed17203a1b6997e7489cac583535f93e933a61ba274a02c0b",
-    // Second Access application that protects the workers.dev branch/commit
-    // preview hostnames. A JWT for either AUD is accepted (see auth.ts).
-    "CF_ACCESS_AUD_PREVIEW": "16fbe4b476b6e9d9d601170b34a8c62b2a99b8f0bd846112ea1de296856c99f2"
+    // Origin of the identity service: login/logout + the auth Worker that issues
+    // sessions. The SPA builds its sign-in/sign-out links from this.
+    "AUTH_ORIGIN": "https://id.troop10rwc.org"
   },
   // Serve the app as a same-origin tab at troop10rwc.org/manage/expenses.
   // Requires troop10rwc.org to be a Cloudflare zone on this account (proxied
@@ -20,12 +20,12 @@
   "routes": [
     { "pattern": "troop10rwc.org/manage/expenses*", "zone_name": "troop10rwc.org" }
   ],
-  // Keep the *.workers.dev subdomain enabled alongside the custom route so
-  // Workers Builds can mint per-version preview URLs for PR branches
-  // (<version>-patrol-expense.<subdomain>.workers.dev). Those preview
-  // hostnames are gated by the second Access app (CF_ACCESS_AUD_PREVIEW).
-  "workers_dev": true,
-  "preview_urls": true,
+  // The session cookie is Domain=troop10rwc.org, so it never reaches a
+  // *.workers.dev host — those previews could never authenticate. Keep the app
+  // exclusively on the troop10rwc.org zone (production above). To get an
+  // authenticated preview, serve it from a *.troop10rwc.org route, not workers.dev.
+  "workers_dev": false,
+  "preview_urls": false,
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
@@ -49,6 +49,17 @@
       "binding": "ROSTER",
       "database_name": "roster-db",
       "database_id": "9657e9c5-3426-4af4-8aaa-706309ad6633",
+      "remote": true
+    },
+    {
+      // Shared identity DB (troop10-id), owned by the auth service at
+      // id.troop10rwc.org. Read-only from this app: the session path looks up the
+      // `__Secure-troop_session` cookie in its `sessions`/`users` tables via the
+      // kit's d1SessionLookup. Don't write to it or add migrations for it.
+      // remote:true for the same reason as roster-db above.
+      "binding": "IDDB",
+      "database_name": "troop10-id",
+      "database_id": "d7f3829c-c2a1-4c7e-bad9-8329eedfd257",
       "remote": true
     }
   ]

@@ -2,8 +2,9 @@
 
 **patrol-expense** — a Troop 10 trip-expense tracker. One-liner: a TypeScript
 serverless app — React/Vite SPA + Hono on Cloudflare Workers, D1 (SQLite) for
-data, Cloudflare Access (Slack SSO) for auth, Google Maps for travel distances.
-Served same-origin at `troop10rwc.org/manage/expenses`.
+data, self-hosted member sessions (Slack enrollment + passkeys, via the shared
+identity service) for auth, Google Maps for travel distances. Served same-origin
+at `troop10rwc.org/manage/expenses`.
 
 ## Runtime & hosting
 - **Cloudflare Workers** — the whole app (API + static assets) runs at the edge,
@@ -32,10 +33,15 @@ Served same-origin at `troop10rwc.org/manage/expenses`.
 - Client routing/auth gating done manually (no router library).
 
 ## Auth
-- **Cloudflare Access** (Zero Trust) with **Slack** as the identity provider —
-  authenticates at the edge for the whole domain. The Worker **verifies the
-  Access JWT** (RS256 via the team JWKS, **WebCrypto**) and reads identity
-  (`src/worker/auth.ts`). No app-level login. `DEV_AUTH_BYPASS=1` for local dev.
+- **Self-hosted member sessions** (the `@troop10rwc/kit` model). The shared
+  identity service at **`id.troop10rwc.org`** (`AUTH_ORIGIN`) handles **Slack
+  enrollment + passkeys**, mints the `__Secure-troop_session` cookie
+  (`Domain=troop10rwc.org`), and writes sessions to the shared **`troop10-id`**
+  D1. This Worker is a pure consumer: it reads the cookie and resolves it against
+  that DB (bound read-only as `IDDB`) via the kit's `d1SessionLookup`
+  (`src/worker/auth.ts`). No Cloudflare Access, no app-level login. Because the
+  cookie is domain-scoped, the app must be served under **`*.troop10rwc.org`**
+  (never `*.workers.dev`). `DEV_AUTH_BYPASS=1` for local dev.
 
 ## External integrations
 - **Google Maps Platform** — Places API (New) for address autocomplete + Routes

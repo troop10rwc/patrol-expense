@@ -13,7 +13,7 @@ import type {
   ImportPreview,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
-import { api, money, HOME_ADDRESS, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
+import { api, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 import { BackOfficeTopNav } from "@troop10rwc/ui";
 
@@ -35,15 +35,23 @@ function appPath(): string {
   return (p.startsWith(BASE_PATH) ? p.slice(BASE_PATH.length) : p) || "/";
 }
 
-// Authentication is handled by Cloudflare Access (Slack SSO) in front of the
-// app, so a request that reaches us is already signed in. We just read the
-// identity; the rare 401 means Access didn't pass a valid token.
+// Member sessions are minted by the shared identity service (id.troop10rwc.org)
+// and validated server-side per request (see src/worker/auth.ts). On load we ask
+// who we are; a 401 means no live session, so we bounce the browser to the
+// identity service's login page, which returns here once signed in.
 export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined=loading
   useEffect(() => {
     api.me()
       .then(setMe)
-      .catch((e) => { if (e instanceof UnauthorizedError) setMe(null); else { console.error(e); setMe(null); } });
+      .catch((e) => {
+        if (e instanceof UnauthorizedError && e.authOrigin) {
+          window.location.href = loginUrl(e.authOrigin);
+          return;
+        }
+        if (!(e instanceof UnauthorizedError)) console.error(e);
+        setMe(null);
+      });
   }, []);
 
   if (me === undefined) return <div className="t10-app"><div className="wrap">Loading…</div></div>;
@@ -52,7 +60,7 @@ export function App() {
   const m = appPath().slice(1).match(UUID_RE);
   return (
     <div className="t10-app">
-      <BackOfficeTopNav active="expenses" user={{ name: me.name }} logoutUrl={logoutUrl} />
+      <BackOfficeTopNav active="expenses" user={{ name: me.name }} logoutUrl={logoutUrl(me.authOrigin)} />
       {m ? <TripView uuid={m[1]} /> : <IndexPage />}
     </div>
   );
@@ -62,8 +70,8 @@ function NoAccess() {
   return (
     <div className="wrap signin">
       <h1>Troop 10 Expenses</h1>
-      <p className="empty">We couldn't read your sign-in. Reload the page, or sign in again.</p>
-      <a className="btn" href={logoutUrl}>Sign in again</a>
+      <p className="empty">We couldn't start a sign-in. Reload the page to try again.</p>
+      <a className="btn" href={location.href}>Reload</a>
     </div>
   );
 }

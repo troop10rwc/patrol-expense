@@ -1,25 +1,20 @@
 import type { MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
-import { verifyAccessJwt } from "@troop10rwc/worker-kit";
+import { d1SessionLookup, SESSION_COOKIE_NAME } from "@troop10rwc/worker-kit";
 import type { Identity } from "@troop10rwc/shared";
 
-// The whole troop10rwc.org domain sits behind Cloudflare Access (Zero Trust)
-// with Slack as the identity provider. Access authenticates users at the edge
-// before requests reach this Worker and injects a signed JWT
-// (Cf-Access-Jwt-Assertion header / CF_Authorization cookie). We verify that
-// JWT and read the user's identity from it — no app-level sign-in needed.
+// Auth is self-hosted member sessions (the kit's current model) — no Cloudflare
+// Access, no app-level sign-in, no JWT verification here. The shared identity
+// service at id.troop10rwc.org (AUTH_ORIGIN) signs members in (Slack enrollment +
+// passkeys), writes the session to the shared IDDB (troop10-id) D1, and sets the
+// `__Secure-troop_session` cookie. This Worker is a pure consumer: it reads that
+// cookie and resolves it against IDDB via the kit's d1SessionLookup.
 //
-// The RS256 + JWKS verification itself lives in @troop10rwc/worker-kit's
-// verifyAccessJwt (shared across Troop 10 apps). This module keeps only the two
-// app-specific behaviors the kit's single-AUD `withAuth` doesn't yet cover:
-//   1. token source — Access forwards the JWT as a header on API calls but only
-//      sets the CF_Authorization cookie on top-level navigations, so we fall
-//      back to the cookie.
-//   2. dual audience — production and the workers.dev preview hostnames are two
-//      separate Access applications with distinct AUD tags; a token for either
-//      is accepted.
-// When worker-kit gains cookie-fallback + multi-AUD support, this can collapse
-// onto the kit's withAuth/requireLeader directly.
+// The cookie is scoped to Domain=troop10rwc.org, so EVERY host that serves this
+// app — production and any preview alike — must live under *.troop10rwc.org for
+// the cookie to arrive (a *.workers.dev host can never carry it). DEV_AUTH_BYPASS=1
+// stands in for a signed-in member locally (there's no identity service in front
+// of dev).
 
 // Re-export so existing importers (src/worker/index.ts) keep a single source.
 export type { Identity };
@@ -27,50 +22,51 @@ export type { Identity };
 export interface AuthBindings {
   DB: D1Database;
   ROSTER: D1Database;
-  CF_ACCESS_TEAM_DOMAIN: string; // e.g. troop10rwc.cloudflareaccess.com
-  CF_ACCESS_AUD: string; // Access application AUD tag (production)
-  CF_ACCESS_AUD_PREVIEW?: string; // AUD of the Access app guarding preview hostnames
-  // DEV ONLY: when "1", skip Access and treat every request as a fixed dev user.
-  // Set in .dev.vars for local work (there's no Access in front locally).
+  // Shared identity DB (troop10-id), owned by the auth service at
+  // id.troop10rwc.org. Read-only from here: the session cookie is looked up in
+  // its `sessions`/`users` tables. Never write to it or add migrations for it.
+  IDDB: D1Database;
+  // Origin of the identity service (login/logout + session issuer),
+  // e.g. https://id.troop10rwc.org.
+  AUTH_ORIGIN: string;
+  // DEV ONLY: when "1", skip the session check and treat every request as a
+  // fixed dev user. Set in .dev.vars for local work; NEVER set in production.
   DEV_AUTH_BYPASS?: string;
 }
 
 /**
- * Verify a Cloudflare Access JWT, accepting a token issued for the production
- * app OR the preview app. Delegates the signature/claims check to worker-kit's
- * verifyAccessJwt (which throws on failure); returns the identity for the first
- * audience that validates, or null if none do.
+ * Require a signed-in member. Validates the `__Secure-troop_session` cookie
+ * against the shared identity DB and exposes the identity as `c.var.user`.
+ *
+ * An unauthenticated API call gets a 401 carrying `authOrigin` so the SPA can
+ * bounce the browser to the identity service's login page (the SPA, not the
+ * Worker, owns the redirect because only it knows the page the member is on).
  */
-async function verifyForAnyAudience(
-  token: string,
-  env: AuthBindings,
-): Promise<Identity | null> {
-  const audiences = [env.CF_ACCESS_AUD, env.CF_ACCESS_AUD_PREVIEW].filter(
-    (a): a is string => Boolean(a),
-  );
-  for (const audience of audiences) {
-    try {
-      return await verifyAccessJwt(token, {
-        teamDomain: env.CF_ACCESS_TEAM_DOMAIN,
-        audience,
-      });
-    } catch {
-      // Wrong AUD (or otherwise invalid) for this app — try the next one.
-    }
-  }
-  return null;
-}
-
-/** Require a Cloudflare Access-authenticated user; sets `user` in context. */
-export const requireAuth: MiddlewareHandler<{ Bindings: AuthBindings; Variables: { user: Identity } }> = async (c, next) => {
+export const requireAuth: MiddlewareHandler<{
+  Bindings: AuthBindings;
+  Variables: { user: Identity };
+}> = async (c, next) => {
   if (c.env.DEV_AUTH_BYPASS === "1") {
     c.set("user", { email: "dev@local", name: "Dev User" });
     return next();
   }
-  const token =
-    c.req.header("Cf-Access-Jwt-Assertion") || getCookie(c, "CF_Authorization");
-  const id = token ? await verifyForAnyAudience(token, c.env) : null;
-  if (!id) return c.json({ error: "unauthorized" }, 401);
-  c.set("user", id);
+
+  const token = getCookie(c, SESSION_COOKIE_NAME);
+  let session: Awaited<ReturnType<ReturnType<typeof d1SessionLookup>>> = null;
+  if (token) {
+    try {
+      session = await d1SessionLookup(c.env.IDDB)(token);
+    } catch (e) {
+      console.warn("session lookup failed:", (e as Error).message);
+    }
+  }
+
+  // Identity stays email-keyed (snapshots record created_by by email); a session
+  // without an email can't be attributed, so treat it as unauthenticated.
+  if (!session?.email) {
+    return c.json({ error: "unauthorized", authOrigin: c.env.AUTH_ORIGIN }, 401);
+  }
+
+  c.set("user", { email: session.email, name: session.name ?? session.email });
   await next();
 };

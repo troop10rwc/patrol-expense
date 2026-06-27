@@ -4,10 +4,10 @@ Troop 10 trip-expense tracker. A Cloudflare Worker (Hono) + React/Vite SPA on a
 normalized D1 database, mounted as a same-origin tab at
 **`troop10rwc.org/manage/expenses`**.
 
-- **Authentication is handled by Cloudflare Access** (Zero Trust, Slack IdP) in
-  front of the whole domain. The Worker verifies the Access JWT and reads the
-  user's identity — there is no app-level sign-in. Who may access is controlled
-  by the Cloudflare Access policy.
+- **Authentication is self-hosted member sessions** (the `@troop10rwc/kit`
+  model). The shared identity service at **`id.troop10rwc.org`** signs members in
+  (Slack enrollment + passkeys) and sets the `__Secure-troop_session` cookie; the
+  Worker validates it against the shared `troop10-id` D1. No app-level sign-in.
 - Roster comes from the external **roster-db** D1 (read-only).
 - Travel addresses use Google Maps (autocomplete + most-direct driving distance) via a server-side proxy.
 
@@ -15,13 +15,13 @@ normalized D1 database, mounted as a same-origin tab at
 
 ```
 src/shared    types + constants (BASE_PATH=/manage/expenses, HOME_ADDRESS)
-src/worker     Hono API, Slack OAuth (auth.ts), roster reader, geo proxy, seed
+src/worker     Hono API, session auth (auth.ts), roster reader, geo proxy, seed
 src/client     React SPA (App.tsx), API client
 migrations     D1 schema (0001 init, 0002 roster-db integration)
 ```
 
 The Worker owns the whole `/manage/expenses/*` subpath: it strips the prefix,
-routes `/api` and `/auth` to Hono, and serves the SPA via the assets binding.
+routes `/api` to Hono, and serves the SPA via the assets binding.
 
 ## Local development
 
@@ -32,25 +32,29 @@ npm run db:migrate:local            # apply migrations to local D1
 npm run dev                         # http://localhost:5173/manage/expenses/
 ```
 
-`.dev.vars` (gitignored) holds secrets. There's no Cloudflare Access locally, so
-set `DEV_AUTH_BYPASS=1` to skip auth (every request becomes a fixed "Dev User").
-`wrangler login` is required because the ROSTER binding reads the real roster-db
-(`remote: true`).
+`.dev.vars` (gitignored) holds secrets. There's no identity service in front of
+local dev, so set `DEV_AUTH_BYPASS=1` to skip auth (every request becomes a fixed
+"Dev User"). `wrangler login` is required because the ROSTER and IDDB bindings
+read the real `roster-db` / `troop10-id` D1s (`remote: true`).
 
 Click **Load 2026 Winter Lodge sample** (or `POST /manage/expenses/api/seed`) to seed demo data.
 
-## Authentication (Cloudflare Access)
+## Authentication (member sessions)
 
-troop10rwc.org is protected by **Cloudflare Access** (Zero Trust) with Slack as
-the identity provider. Access authenticates at the edge and injects a signed JWT;
-the Worker verifies it (JWKS + AUD) and reads the user's email/name. No app-level
-login. `wrangler.jsonc` vars set `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` (the
-Access application's AUD tag).
+Auth is **self-hosted member sessions**, shared across Troop 10 apps via
+`@troop10rwc/kit`. The standalone identity service at **`id.troop10rwc.org`**
+handles enrollment (Slack, workspace-locked) and the daily driver (passkeys),
+mints the `__Secure-troop_session` cookie (`Domain=troop10rwc.org`), and writes
+each session to the shared **`troop10-id`** D1. This Worker doesn't sign anyone
+in — it reads the cookie and resolves it against `troop10-id` (bound read-only as
+`IDDB`) with the kit's `d1SessionLookup` (`src/worker/auth.ts`). An API call with
+no live session gets a `401` carrying `AUTH_ORIGIN`; the SPA then bounces the
+browser to `${AUTH_ORIGIN}/login?redirect=…`, which returns here once signed in.
 
-**Who can access `/manage/expenses`** is governed by the Cloudflare Access
-policy. To restrict it more tightly than the rest of the site, add a dedicated
-Access application for `troop10rwc.org/manage/expenses*` with the desired policy
-(e.g. a group or email list of roster members).
+**Domain constraint.** The session cookie is scoped to `troop10rwc.org`, so the
+app must be served under **`*.troop10rwc.org`** — a `*.workers.dev` host can never
+receive it. That's why `workers_dev`/`preview_urls` are off: an authenticated
+preview must be served from a `*.troop10rwc.org` route, not a workers.dev URL.
 
 ## Production deploy
 
@@ -59,7 +63,9 @@ Access application for `troop10rwc.org/manage/expenses*` with the desired policy
 2. **Migrations**: `npm run db:migrate:remote`.
 3. **Secrets** (`wrangler secret put NAME`): `GOOGLE_MAPS_API_KEY`. Do **not** set
    `DEV_AUTH_BYPASS` in production.
-4. **Access vars** in `wrangler.jsonc`: `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
+4. **Auth**: `wrangler.jsonc` sets `AUTH_ORIGIN` (`https://id.troop10rwc.org`) and
+   binds the shared `troop10-id` D1 read-only as `IDDB`. The identity service must
+   already be deployed at that origin (repo: `troop10rwc/id`).
 5. **Route**: `wrangler.jsonc` declares `troop10rwc.org/manage/expenses*` (the
    zone is on Cloudflare; all other paths fall through to the existing site).
 6. `npm run deploy`.

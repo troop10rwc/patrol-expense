@@ -26,14 +26,15 @@ type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 const app = new Hono<Env>();
 const api = new Hono<Env>();
 
-// Authentication is handled by Cloudflare Access in front of the Worker; this
-// just reads the verified identity (and is a safety net behind Access).
+// Every API call requires a signed-in member (session cookie resolved against
+// the shared identity DB; see auth.ts).
 api.use("*", requireAuth);
 
-// Who am I? (identity from the Cloudflare Access JWT.)
+// Who am I? Also hands the SPA the identity service origin so it can build the
+// logout link (and the sign-in link, on the 401 path).
 api.get("/me", (c) => {
   const u = c.get("user");
-  return c.json({ email: u.email, name: u.name });
+  return c.json({ email: u.email, name: u.name, authOrigin: c.env.AUTH_ORIGIN });
 });
 
 const bad = (msg: string) => ({ error: msg });

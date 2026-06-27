@@ -3,9 +3,10 @@ import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
 
-/** Thrown when an API call returns 401 — the caller should show sign-in. */
+/** Thrown when an API call returns 401 — the caller should send the member to
+ *  sign in. Carries the identity service origin when the Worker provided it. */
 export class UnauthorizedError extends Error {
-  constructor() { super("unauthorized"); }
+  constructor(public authOrigin?: string) { super("unauthorized"); }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -13,7 +14,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  if (res.status === 401) throw new UnauthorizedError();
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({}));
+    throw new UnauthorizedError((body as { authOrigin?: string }).authOrigin);
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error((body as any).error ?? `Request failed: ${res.status}`);
@@ -24,10 +28,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export interface Me {
   email: string;
   name: string;
+  // Origin of the shared identity service (e.g. https://id.troop10rwc.org),
+  // used to build the sign-in / sign-out links.
+  authOrigin: string;
 }
 
-// Cloudflare Access handles sign-in/out at the domain level.
-export const logoutUrl = "/cdn-cgi/access/logout";
+// Sign-in / sign-out live at the shared identity service (id.troop10rwc.org).
+// Both carry a redirect back into this app once the ceremony completes.
+export const loginUrl = (authOrigin: string) =>
+  `${authOrigin}/login?redirect=${encodeURIComponent(location.href)}`;
+export const logoutUrl = (authOrigin: string) =>
+  `${authOrigin}/logout?redirect=${encodeURIComponent(location.origin + BASE_PATH)}`;
 
 export const api = {
   me: () => req<Me>("/api/me"),
