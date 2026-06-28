@@ -251,6 +251,43 @@ export interface ImportPreview {
   flags: ImportFlag[];
 }
 
+// ----- per-person statement (consolidated across events) -----
+// A single member's own expense summary across every trip they took part in.
+// Built server-side: the live paysheet gives the current owed/due, and each
+// snapshot's frozen paysheet gives a historical point so corrections that moved
+// the number after a snapshot read as explicit deltas.
+
+/** One historical point in a person's per-event balance, read from a snapshot. */
+export interface StatementHistoryPoint {
+  snapshot_id: number;
+  label: string | null;
+  created_at: string;
+  outstanding: number; // this person's outstanding frozen in the snapshot
+  delta: number; // change vs the previous point (first point's delta == its outstanding)
+}
+
+/** One event (trip) on a person's consolidated statement. */
+export interface StatementEvent {
+  trip: { uuid: string; slug: string; name: string; trip_date: string | null };
+  person_id: number; // the matched person within this trip
+  paid: number; // receipts they fronted (live)
+  owed: number; // their derived share (live)
+  prepay: number; // already reimbursed (live)
+  outstanding: number; // live net (positive => troop owes them)
+  status: SettlementStatus;
+  projected: boolean; // no snapshot yet, or live differs from the latest snapshot
+  liveDelta: number; // live outstanding minus the latest snapshot's (uncaptured movement)
+  history: StatementHistoryPoint[]; // oldest -> newest
+}
+
+/** A person's consolidated expense statement across the events they appear in. */
+export interface PersonStatement {
+  person: { email: string | null; name: string; matched: boolean };
+  events: StatementEvent[];
+  totalOutstanding: number; // sum of live outstanding across events (positive => owed to them)
+  projected: boolean; // true when any event is still projected (not fully snapshotted)
+}
+
 /** Lightweight per-trip rollup for the index page. */
 export interface TripSummary {
   trip: Trip;

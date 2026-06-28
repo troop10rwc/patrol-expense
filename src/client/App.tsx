@@ -11,6 +11,8 @@ import type {
   SnapshotMeta,
   Snapshot,
   ImportPreview,
+  PersonStatement,
+  StatementEvent,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
@@ -57,11 +59,13 @@ export function App() {
   if (me === undefined) return <div className="t10-app"><div className="wrap">Loading…</div></div>;
   if (me === null) return <div className="t10-app"><NoAccess /></div>;
 
-  const m = appPath().slice(1).match(UUID_RE);
+  const path = appPath();
+  const m = path.slice(1).match(UUID_RE);
+  const view = path === "/me" ? <StatementPage /> : m ? <TripView uuid={m[1]} /> : <IndexPage />;
   return (
     <div className="t10-app">
       <BackOfficeTopNav active="expenses" user={{ name: me.name }} logoutUrl={logoutUrl(me.authOrigin)} />
-      {m ? <TripView uuid={m[1]} /> : <IndexPage />}
+      {view}
     </div>
   );
 }
@@ -117,6 +121,7 @@ function IndexPage() {
           <div className="meta"><span>Troop trip expense sheets</span></div>
         </div>
         <div className="row">
+          <a className="btn ghost" href={appHref("/me")}>My statement</a>
           <button className="btn ghost" onClick={() => setShowImport(true)}>Import from Google Sheet</button>
           <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
         </div>
@@ -178,6 +183,134 @@ function IndexPage() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- My statement
+// The signed-in member's own expenses across every trip. One prominent grand
+// total (flagged "Projected" when trips are still collecting), then a card per
+// event showing the current owed/due and the snapshot deltas that explain how
+// the number moved. Only this member's figures are shown.
+function StatementPage() {
+  const [stmt, setStmt] = useState<PersonStatement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.myStatement().then(setStmt).catch((e) => setError(String(e)));
+  }, []);
+
+  if (error)
+    return (
+      <div className="wrap">
+        <div className="err">{error}</div>
+        <p><a href={appHref("/")}>← All trips</a></p>
+      </div>
+    );
+  if (!stmt) return <div className="wrap">Loading…</div>;
+
+  return (
+    <div className="wrap">
+      <header className="app">
+        <div>
+          <h1>My statement</h1>
+          <div className="meta"><span>Your expenses across every trip</span></div>
+        </div>
+        <div className="row"><a className="btn ghost" href={appHref("/")}>← All trips</a></div>
+      </header>
+
+      {!stmt.person.matched ? (
+        <div className="card">
+          <p className="empty">
+            We couldn't match your sign-in{stmt.person.email ? ` (${stmt.person.email})` : ""} to a member on any trip.
+          </p>
+          <p className="hint">Statements are keyed to your roster email. If it looks wrong, ask a leader to check the roster.</p>
+        </div>
+      ) : (
+        <>
+          <StatementTotal stmt={stmt} />
+          {stmt.events.map((ev) => <StatementEventCard key={ev.trip.uuid} ev={ev} />)}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Signed delta with an explicit + / − (money() only shows − for negatives).
+function signed(n: number): string {
+  return `${n >= 0 ? "+" : "−"}${money(Math.abs(n))}`;
+}
+
+function StatementTotal({ stmt }: { stmt: PersonStatement }) {
+  const t = stmt.totalOutstanding;
+  const settled = Math.abs(t) < 0.005;
+  const label = settled ? "You're all settled" : t > 0 ? "Troop owes you" : "You owe the troop";
+  return (
+    <div className="card stmt-total">
+      <div className="stmt-total-label">
+        {label}
+        {stmt.projected && (
+          <span className="pill" title="Includes trips still collecting expenses (not yet snapshotted)">Projected</span>
+        )}
+      </div>
+      <div className={`stmt-total-amt ${t < 0 ? "neg" : ""}`}>{money(Math.abs(t))}</div>
+      {stmt.projected && (
+        <p className="hint">Some trips haven't been finalized in a snapshot yet, so this total may still change as expenses are collected.</p>
+      )}
+    </div>
+  );
+}
+
+function StatementEventCard({ ev }: { ev: StatementEvent }) {
+  const o = ev.outstanding;
+  const settled = Math.abs(o) < 0.005;
+  const dir = settled ? "Settled" : o > 0 ? "Owed to you" : "You owe";
+  const showLive = ev.history.length > 0 && Math.abs(ev.liveDelta) > 0.005;
+  return (
+    <div className="card stmt-event">
+      <div className="row stmt-event-head">
+        <a className="trip-link" href={appHref(`/${ev.trip.uuid}/${ev.trip.slug}#reimbursement`)}>{ev.trip.name}</a>
+        <span className="hint">{ev.trip.trip_date ?? "—"}</span>
+        {ev.projected && (
+          <span className="pill" title="Live figures differ from the latest snapshot, or none has been taken">Projected</span>
+        )}
+        {ev.status !== "none" && <span className="pill pill-new">{ev.status}</span>}
+      </div>
+
+      <div className="stmt-event-amt">
+        <span className="hint">{dir}</span>{" "}
+        <strong className={o < 0 ? "neg" : ""}>{money(Math.abs(o))}</strong>
+      </div>
+      <div className="hint stmt-breakdown">
+        Paid {money(ev.paid)} · Share {money(ev.owed)}
+        {ev.prepay ? ` · Pre-reimbursed ${money(ev.prepay)}` : ""}
+      </div>
+
+      <div className="stmt-hist">
+        {ev.history.length === 0 ? (
+          <div className="stmt-hist-row">
+            <span className="hint">No snapshot taken yet — projected from current expenses.</span>
+          </div>
+        ) : (
+          ev.history.map((h, i) => (
+            <div className="stmt-hist-row" key={h.snapshot_id}>
+              <span className="stmt-hist-when">
+                {fmtTime(h.created_at)}
+                {h.label ? ` · ${h.label}` : i === 0 ? " · baseline" : ""}
+              </span>
+              <span className="stmt-hist-out">{money(h.outstanding)}</span>
+              <span className={`stmt-hist-delta ${h.delta < 0 ? "neg" : ""}`}>{i === 0 ? "" : signed(h.delta)}</span>
+            </div>
+          ))
+        )}
+        {showLive && (
+          <div className="stmt-hist-row projected">
+            <span className="stmt-hist-when">Since last snapshot <span className="hint">(not captured)</span></span>
+            <span className="stmt-hist-out">{money(ev.outstanding)}</span>
+            <span className={`stmt-hist-delta ${ev.liveDelta < 0 ? "neg" : ""}`}>{signed(ev.liveDelta)}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
