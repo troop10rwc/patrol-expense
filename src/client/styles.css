@@ -280,3 +280,22 @@ tr.snapshot-detail table { margin: 0; background: var(--t10-surface); border: 1p
 .snapshot-actions { white-space: nowrap; }
 .snapshot-actions a { margin-right: 10px; }
 .changed-key { background: var(--t10-amber-tint); box-shadow: inset 2px 0 0 var(--t10-amber); padding: 0 5px; border-radius: 3px; color: var(--t10-ink); }
+
+/* ---- My statement (per-person summary across events) ---- */
+.stmt-total { text-align: center; }
+.stmt-total-label { font-size: var(--t10-fs-sm); color: var(--t10-ink-soft); display: flex; gap: 8px; align-items: center; justify-content: center; }
+.stmt-total-amt { font-family: var(--t10-font-mono); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 700; color: var(--t10-pine-deep); margin-top: 4px; }
+.stmt-total-amt.neg { color: var(--t10-clay-deep); }
+.stmt-event-head { gap: 10px; align-items: baseline; }
+.stmt-event-head .trip-link { font-weight: 600; font-size: 16px; }
+.stmt-event-amt { margin-top: 6px; font-size: 18px; }
+.stmt-event-amt strong { font-family: var(--t10-font-mono); font-variant-numeric: tabular-nums; color: var(--t10-pine-deep); }
+.stmt-event-amt strong.neg { color: var(--t10-clay-deep); }
+.stmt-breakdown { margin-top: 2px; }
+.stmt-hist { margin-top: 12px; border-top: 1px solid var(--t10-line-soft); padding-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.stmt-hist-row { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: baseline; font-size: var(--t10-fs-sm); padding: 2px 0; }
+.stmt-hist-when { color: var(--t10-ink-soft); }
+.stmt-hist-out, .stmt-hist-delta { font-family: var(--t10-font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.stmt-hist-delta { min-width: 72px; color: var(--t10-pine-deep); font-weight: 600; }
+.stmt-hist-delta.neg { color: var(--t10-clay-deep); }
+.stmt-hist-row.projected { border-top: 1px dashed var(--t10-line-soft); margin-top: 4px; padding-top: 6px; }

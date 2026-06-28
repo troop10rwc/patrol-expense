@@ -9,6 +9,7 @@ import { parseXlsxTabs } from "./xlsx.ts";
 import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
+import { buildStatement } from "./statement.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -35,6 +36,20 @@ api.use("*", requireAuth);
 api.get("/me", (c) => {
   const u = c.get("user");
   return c.json({ email: u.email, name: u.name, authOrigin: c.env.AUTH_ORIGIN });
+});
+
+// The signed-in member's own expense statement across every event: per-trip
+// owed/due with the snapshot deltas that explain how each number moved, plus a
+// single projected grand total. Only this member's figures are returned.
+api.get("/me/statement", async (c) => {
+  const u = c.get("user");
+  const statement = await buildStatement(
+    c.env.DB,
+    c.env.ROSTER,
+    { email: u.email ?? null, name: u.name },
+    c.env.DEV_AUTH_BYPASS === "1",
+  );
+  return c.json(statement);
 });
 
 const bad = (msg: string) => ({ error: msg });

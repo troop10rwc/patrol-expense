@@ -1,4 +1,4 @@
-import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot, ImportPreview } from "../shared/types.ts";
+import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot, ImportPreview, PersonStatement } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
@@ -42,6 +42,7 @@ export const logoutUrl = (authOrigin: string) =>
 
 export const api = {
   me: () => req<Me>("/api/me"),
+  myStatement: () => req<PersonStatement>("/api/me/statement"),
   listTrips: () => req<Trip[]>("/api/trips"),
   getSummary: () => req<TripSummary[]>("/api/summary"),
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),
