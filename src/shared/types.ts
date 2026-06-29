@@ -288,6 +288,15 @@ export interface PersonStatement {
   projected: boolean; // true when any event is still projected (not fully snapshotted)
 }
 
+/** One trip where the troop still owes a member money. Returned by the read-only
+ *  service-binding RPC `getOutstandingForMember` (consumed by the dashboard's
+ *  "What's Next" card). A compact projection of {@link StatementEvent}. */
+export interface OutstandingExpense {
+  tripName: string;
+  outstanding: number; // dollars still owed to the member (positive)
+  status: SettlementStatus;
+}
+
 /** Lightweight per-trip rollup for the index page. */
 export interface TripSummary {
   trip: Trip;

@@ -1,5 +1,6 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
-import type { Trip, TripBundle, SnapshotMeta, ImportPreview } from "../shared/types.ts";
+import type { Trip, TripBundle, SnapshotMeta, ImportPreview, OutstandingExpense } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
@@ -641,12 +642,17 @@ api.notFound((c) => c.json(bad("not found"), 404));
 
 app.route("/api", api);
 
-// The app is mounted under /manage/expenses. This handler owns the whole
-// subpath: strip the prefix, then route /api to Hono and everything else to the
-// static assets (SPA). Assets are built with Vite base "/manage/expenses/" but
-// stored at their root paths, so the prefix must be stripped before serving.
-export default {
-  async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
+// Default export is a WorkerEntrypoint so other Workers can reach read-only RPC
+// methods over a service binding (same pattern as troop-calendar). The HTTP app
+// is unchanged — it's just served from the entrypoint's `fetch`.
+//
+// The app is mounted under /manage/expenses. `fetch` owns the whole subpath:
+// strip the prefix, then route /api to Hono and everything else to the static
+// assets (SPA). Assets are built with Vite base "/manage/expenses/" but stored
+// at their root paths, so the prefix must be stripped before serving.
+export default class ExpenseWorker extends WorkerEntrypoint<Bindings> {
+  async fetch(request: Request): Promise<Response> {
+    const { env, ctx } = this;
     const url = new URL(request.url);
     if (!url.pathname.startsWith(BASE_PATH)) {
       return new Response("Not found", { status: 404 });
@@ -667,5 +673,21 @@ export default {
     const assetUrl = new URL(url);
     assetUrl.pathname = rel;
     return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
-  },
-};
+  }
+
+  /**
+   * Read-only RPC: the trips where the troop still owes `email` money. Reuses
+   * the same `buildStatement` derivation the `/me/statement` page uses, so the
+   * figures always match. Returns `[]` for non-adults or members with nothing
+   * outstanding. Never exposes any other member's amounts.
+   */
+  async getOutstandingForMember(email: string): Promise<OutstandingExpense[]> {
+    const e = (email ?? "").trim();
+    if (!e) return [];
+    const EPS = 0.005;
+    const statement = await buildStatement(this.env.DB, this.env.ROSTER, { email: e, name: e });
+    return statement.events
+      .filter((ev) => ev.outstanding > EPS && ev.status !== "paid")
+      .map((ev) => ({ tripName: ev.trip.name, outstanding: ev.outstanding, status: ev.status }));
+  }
+}
