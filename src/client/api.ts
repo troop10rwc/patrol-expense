@@ -25,6 +25,21 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Like `req`, but for multipart uploads: the browser must set its own
+// Content-Type (with the boundary), so we don't send a JSON header.
+async function reqForm<T>(path: string, form: FormData, method = "POST"): Promise<T> {
+  const res = await fetch(`${BASE_PATH}${path}`, { method, body: form });
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({}));
+    throw new UnauthorizedError((body as { authOrigin?: string }).authOrigin);
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as any).error ?? `Request failed: ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export interface Me {
   email: string;
   name: string;
@@ -77,8 +92,31 @@ export const api = {
   addExpense: (
     tripId: number,
     body: { group_id: number; description: string; amount: number; payer_ref: string },
-  ) => req<TripBundle>(`/api/trips/${tripId}/expenses`, { method: "POST", body: JSON.stringify(body) }),
+    files?: File[],
+  ) => {
+    if (files && files.length) {
+      const form = new FormData();
+      form.set("group_id", String(body.group_id));
+      form.set("description", body.description);
+      form.set("amount", String(body.amount));
+      form.set("payer_ref", body.payer_ref);
+      for (const f of files) form.append("files", f);
+      return reqForm<TripBundle>(`/api/trips/${tripId}/expenses`, form);
+    }
+    return req<TripBundle>(`/api/trips/${tripId}/expenses`, { method: "POST", body: JSON.stringify(body) });
+  },
   deleteExpense: (eid: number) => req<TripBundle>(`/api/expenses/${eid}`, { method: "DELETE" }),
+
+  // ---- expense attachments (receipts) ----
+  uploadAttachments: (eid: number, files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    return reqForm<TripBundle>(`/api/expenses/${eid}/attachments`, form);
+  },
+  deleteAttachment: (aid: number) => req<TripBundle>(`/api/attachments/${aid}`, { method: "DELETE" }),
+  // Same-origin GET carries the session cookie, so this URL is directly usable as
+  // a link / <img> src.
+  attachmentUrl: (aid: number) => `${BASE_PATH}/api/attachments/${aid}`,
 
   addPrepayment: (tripId: number, body: { person_id: number; amount: number; note?: string }) =>
     req<TripBundle>(`/api/trips/${tripId}/prepayments`, { method: "POST", body: JSON.stringify(body) }),

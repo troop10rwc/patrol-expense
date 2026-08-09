@@ -35,6 +35,16 @@
     // "/manage/expenses/" but stored at their root paths.
     "run_worker_first": ["/manage/expenses/*"]
   },
+  // Expense attachments (receipt images / PDFs). Served through the Worker's
+  // authenticated GET route, never a public bucket. `wrangler dev`/vite simulate
+  // this bucket locally; create the prod bucket once with
+  // `wrangler r2 bucket create patrol-expense-receipts`.
+  "r2_buckets": [
+    {
+      "binding": "RECEIPTS",
+      "bucket_name": "patrol-expense-receipts"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

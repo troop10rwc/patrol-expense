@@ -299,3 +299,19 @@ tr.snapshot-detail table { margin: 0; background: var(--t10-surface); border: 1p
 .stmt-hist-delta { min-width: 72px; color: var(--t10-pine-deep); font-weight: 600; }
 .stmt-hist-delta.neg { color: var(--t10-clay-deep); }
 .stmt-hist-row.projected { border-top: 1px dashed var(--t10-line-soft); margin-top: 4px; padding-top: 6px; }
+
+/* ---- Expense attachments (receipts) ---- */
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.attachment {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--t10-surface-2); border: 1px solid var(--t10-line-soft);
+  border-radius: var(--t10-r-sm); padding: 2px 4px 2px 8px; font-size: var(--t10-fs-sm);
+  max-width: 220px;
+}
+.attachment a { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-x {
+  border: none; background: none; cursor: pointer; color: var(--t10-ink-soft);
+  padding: 0 2px; line-height: 1; font-size: 12px;
+}
+.attachment-x:hover { color: var(--t10-clay-deep); }
+.attachment-x:disabled { opacity: .5; cursor: default; }

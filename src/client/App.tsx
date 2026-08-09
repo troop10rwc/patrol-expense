@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import type {
   TripBundle,
   TripSummary,
   Person,
+  Expense,
   CostGroup,
   GroupSummary,
   SettlementStatus,
@@ -1300,6 +1301,8 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
 }
 
 // ------------------------------------------------------------------ Expenses
+const ATTACHMENT_ACCEPT = "image/*,application/pdf";
+
 function Expenses({ bundle, roster, run, busy }: TabProps) {
   const { personById } = useMaps(bundle);
   const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
@@ -1309,14 +1312,22 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   const [payerRef, setPayerRef] = useState<string>("");
   const [desc, setDesc] = useState("");
   const [amount, setAmount] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const effectivePayer = payerRef || adultPool[0]?.ref || "";
 
   function add() {
     const amt = parseFloat(amount);
     if (!desc || !groupId || !effectivePayer || isNaN(amt)) return;
-    run(() => api.addExpense(bundle.trip.id, { group_id: groupId, payer_ref: effectivePayer, description: desc, amount: amt }))
-      .then(() => { setDesc(""); setAmount(""); });
+    run(() =>
+      api.addExpense(bundle.trip.id, { group_id: groupId, payer_ref: effectivePayer, description: desc, amount: amt }, files),
+    ).then(() => {
+      setDesc("");
+      setAmount("");
+      setFiles([]);
+      if (fileInput.current) fileInput.current.value = "";
+    });
   }
 
   return (
@@ -1339,6 +1350,16 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
         <label className="fld">Amount
           <input className="sm" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" />
         </label>
+        <label className="fld">Receipt files <span className="hint">(optional)</span>
+          <input
+            ref={fileInput}
+            type="file"
+            accept={ATTACHMENT_ACCEPT}
+            multiple
+            disabled={busy}
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+          />
+        </label>
         <button className="btn" disabled={busy} onClick={add}>Add</button>
       </div>
 
@@ -1351,7 +1372,7 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
             <h3>{g.name} — {money(summary.total)}{summary.totalShares > 0 && <> · {money(summary.perShare)}/share ({summary.totalShares} shares)</>}</h3>
             <table>
               <thead>
-                <tr><th>Receipt</th><th>Paid by</th><th className="num">Amount</th><th></th></tr>
+                <tr><th>Receipt</th><th>Paid by</th><th className="num">Amount</th><th>Files</th><th></th></tr>
               </thead>
               <tbody>
                 {rows.map((e) => (
@@ -1359,6 +1380,7 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                     <td>{e.description}{e.source_travel_group_id && <span className="pill" style={{ marginLeft: 6 }}>auto</span>}</td>
                     <td>{personById.get(e.payer_id)?.name ?? "?"}</td>
                     <td className="num">{money(e.amount)}</td>
+                    <td><AttachmentCell expense={e} run={run} busy={busy} /></td>
                     <td className="num">
                       {!e.source_travel_group_id && (
                         <button className="btn danger" disabled={busy} onClick={() => run(() => api.deleteExpense(e.id))}>Delete</button>
@@ -1371,6 +1393,55 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// The Files cell for one receipt: existing attachments as inline links (with a
+// remove ✕) plus an Attach control. Attaching is hidden for auto travel rows,
+// which never carry receipts.
+function AttachmentCell({ expense, run, busy }: { expense: Expense; run: TabProps["run"]; busy: boolean }) {
+  const input = useRef<HTMLInputElement>(null);
+
+  function onPick(e: ChangeEvent<HTMLInputElement>) {
+    const picked = Array.from(e.target.files ?? []);
+    if (picked.length) run(() => api.uploadAttachments(expense.id, picked));
+    if (input.current) input.current.value = "";
+  }
+
+  return (
+    <div className="attachments">
+      {expense.attachments.map((a) => (
+        <span key={a.id} className="attachment">
+          <a href={api.attachmentUrl(a.id)} target="_blank" rel="noreferrer" title={a.filename}>
+            {a.content_type === "application/pdf" ? "📄" : "🖼️"} {a.filename}
+          </a>
+          <button
+            className="attachment-x"
+            aria-label={`Remove ${a.filename}`}
+            title="Remove"
+            disabled={busy}
+            onClick={() => run(() => api.deleteAttachment(a.id))}
+          >
+            ✕
+          </button>
+        </span>
+      ))}
+      {!expense.source_travel_group_id && (
+        <>
+          <button className="btn ghost sm-btn" disabled={busy} onClick={() => input.current?.click()}>
+            Attach
+          </button>
+          <input
+            ref={input}
+            type="file"
+            accept={ATTACHMENT_ACCEPT}
+            multiple
+            hidden
+            onChange={onPick}
+          />
+        </>
+      )}
     </div>
   );
 }

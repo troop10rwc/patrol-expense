@@ -59,6 +59,17 @@ export interface CostGroup {
   cost_group_id: number | null;
 }
 
+/** A file (receipt image / PDF) attached to an expense. The binary lives in R2;
+ *  this is the metadata carried on the bundle. */
+export interface ExpenseAttachment {
+  id: number;
+  expense_id: number;
+  filename: string;
+  content_type: string;
+  size: number;
+  created_at: string;
+}
+
 export interface Expense {
   id: number;
   trip_id: number;
@@ -68,6 +79,7 @@ export interface Expense {
   payer_id: number;
   source_travel_group_id: number | null;
   created_at: string;
+  attachments: ExpenseAttachment[];
 }
 
 export interface Prepayment {

@@ -3,6 +3,7 @@ import type {
   Person,
   CostGroup,
   Expense,
+  ExpenseAttachment,
   Prepayment,
   GroupMember,
   SettlementStatus,
@@ -67,6 +68,21 @@ export async function loadTripBundle(db: D1Database, tripId: number): Promise<Tr
   if (!input) return null;
   const groupSummaries = computeGroupSummaries(input);
   const paysheet = computePaysheet(input, groupSummaries);
+
+  // Attachments don't feed the paysheet engine — load them here and hang each
+  // expense's files off the bundle for the client.
+  const attachments = await db
+    .prepare(
+      "SELECT id, expense_id, filename, content_type, size, created_at FROM expense_attachments WHERE trip_id = ? ORDER BY id",
+    )
+    .bind(tripId)
+    .all<ExpenseAttachment>();
+  const byExpense = new Map<number, ExpenseAttachment[]>();
+  for (const a of attachments.results ?? []) {
+    (byExpense.get(a.expense_id) ?? byExpense.set(a.expense_id, []).get(a.expense_id)!).push(a);
+  }
+  for (const e of input.expenses) e.attachments = byExpense.get(e.id) ?? [];
+
   return {
     trip: input.trip,
     people: input.people,
