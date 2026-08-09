@@ -1771,6 +1771,13 @@ function PersonPicker({
           value={query}
           disabled={busy}
           placeholder={placeholder ?? "Add by name or email — or paste a list"}
+          name="participant-search"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-1p-ignore
+          data-lpignore="true"
           onChange={(e) => setQuery(e.target.value)}
           onPaste={onPaste}
           onKeyDown={(e) => {
