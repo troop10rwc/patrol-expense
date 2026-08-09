@@ -16,6 +16,7 @@ import { BASE_PATH } from "../shared/constants.ts";
 
 interface Bindings extends AuthBindings {
   ASSETS: Fetcher;
+  RECEIPTS: R2Bucket; // expense attachment files (receipts / PDFs)
   GOOGLE_MAPS_API_KEY?: string;
   ENVIRONMENT?: string; // "development" in dev (.dev.vars); "production" otherwise
 }
@@ -331,21 +332,137 @@ api.put("/groups/:gid/members", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
+// ---- expense attachments (receipts) ----
+// Files live in R2 (RECEIPTS); expense_attachments is the metadata index. Only
+// images and PDFs, up to 10 MB each. Served back through the authenticated GET
+// route below — never a public bucket, since receipts can carry personal info.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+function validateAttachment(file: File): string | null {
+  if (!(file.type.startsWith("image/") || file.type === "application/pdf"))
+    return `Unsupported file type: ${file.type || "unknown"} (images and PDFs only)`;
+  if (file.size === 0) return `Empty file: ${file.name}`;
+  if (file.size > MAX_ATTACHMENT_BYTES) return `File too large: ${file.name} (max 10 MB)`;
+  return null;
+}
+
+// Sanitize for use in an R2 key and a Content-Disposition filename.
+function safeFilename(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? "file";
+  return base.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "file";
+}
+
+// Assumes the file already passed validateAttachment. Puts the object first so a
+// committed row always points at real bytes, then records the metadata row.
+async function storeAttachment(env: Bindings, tripId: number, expenseId: number, file: File): Promise<void> {
+  const filename = safeFilename(file.name);
+  const key = `trip/${tripId}/expense/${expenseId}/${crypto.randomUUID()}-${filename}`;
+  await env.RECEIPTS.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+  await env.DB.prepare(
+    "INSERT INTO expense_attachments (expense_id, trip_id, r2_key, filename, content_type, size) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+    .bind(expenseId, tripId, key, filename, file.type, file.size)
+    .run();
+}
+
 // ---- expenses ----
+// Accepts JSON (no files) or multipart/form-data (add-time file upload): the
+// multipart body carries the same fields plus one or more `files` parts. Files
+// are validated up front so a bad file never leaves a half-created expense.
 api.post("/trips/:id/expenses", async (c) => {
   const tripId = Number(c.req.param("id"));
-  const b = await c.req.json<{ group_id: number; description: string; amount: number; payer_id?: number; payer_ref?: string }>();
-  if (!b.group_id || b.amount == null || !b.description || (!b.payer_id && !b.payer_ref))
-    return c.json(bad("group_id, payer (id or ref), amount, description are required"), 400);
-  const payerId = b.payer_ref
-    ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.payer_ref)
-    : b.payer_id!;
-  await c.env.DB.prepare(
+  const ct = c.req.header("content-type") ?? "";
+
+  let group_id: number;
+  let description: string;
+  let amount: number;
+  let payerId: number;
+  let files: File[] = [];
+
+  if (ct.includes("multipart/form-data")) {
+    const form = await c.req.formData();
+    group_id = Number(form.get("group_id"));
+    description = String(form.get("description") ?? "");
+    amount = Number(form.get("amount"));
+    const payer_ref = form.get("payer_ref");
+    const payer_id = form.get("payer_id");
+    if (!group_id || !description || Number.isNaN(amount) || (!payer_ref && !payer_id))
+      return c.json(bad("group_id, payer (id or ref), amount, description are required"), 400);
+    payerId = payer_ref
+      ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, String(payer_ref))
+      : Number(payer_id);
+    files = form.getAll("files").filter((f): f is File => f instanceof File);
+    for (const f of files) {
+      const err = validateAttachment(f);
+      if (err) return c.json(bad(err), 400);
+    }
+  } else {
+    const b = await c.req.json<{ group_id: number; description: string; amount: number; payer_id?: number; payer_ref?: string }>();
+    if (!b.group_id || b.amount == null || !b.description || (!b.payer_id && !b.payer_ref))
+      return c.json(bad("group_id, payer (id or ref), amount, description are required"), 400);
+    group_id = b.group_id;
+    description = b.description;
+    amount = b.amount;
+    payerId = b.payer_ref ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.payer_ref) : b.payer_id!;
+  }
+
+  const ins = await c.env.DB.prepare(
     "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
   )
-    .bind(tripId, b.group_id, b.description, b.amount, payerId)
+    .bind(tripId, group_id, description, amount, payerId)
     .run();
+  const expenseId = Number(ins.meta.last_row_id);
+
+  for (const f of files) await storeAttachment(c.env, tripId, expenseId, f);
+
   return c.json(await bundleResponse(c.env.DB, tripId), 201);
+});
+
+// Attach one or more files to an existing expense (multipart/form-data, `files`).
+api.post("/expenses/:eid/attachments", async (c) => {
+  const eid = Number(c.req.param("eid"));
+  const row = await c.env.DB.prepare("SELECT trip_id FROM expenses WHERE id = ?").bind(eid).first<{ trip_id: number }>();
+  if (!row) return c.json(bad("expense not found"), 404);
+  const form = await c.req.formData();
+  const files = form.getAll("files").filter((f): f is File => f instanceof File);
+  if (files.length === 0) return c.json(bad("no files provided"), 400);
+  for (const f of files) {
+    const err = validateAttachment(f);
+    if (err) return c.json(bad(err), 400);
+  }
+  for (const f of files) await storeAttachment(c.env, row.trip_id, eid, f);
+  return c.json(await bundleResponse(c.env.DB, row.trip_id));
+});
+
+// Stream an attachment back to the (authenticated) browser, inline so images and
+// PDFs render in a tab.
+api.get("/attachments/:aid", async (c) => {
+  const aid = Number(c.req.param("aid"));
+  const row = await c.env.DB
+    .prepare("SELECT r2_key, filename, content_type FROM expense_attachments WHERE id = ?")
+    .bind(aid)
+    .first<{ r2_key: string; filename: string; content_type: string }>();
+  if (!row) return c.json(bad("attachment not found"), 404);
+  const obj = await c.env.RECEIPTS.get(row.r2_key);
+  if (!obj) return c.json(bad("file not found"), 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("Content-Type", row.content_type);
+  headers.set("Content-Disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+  headers.set("Cache-Control", "private, max-age=3600");
+  return new Response(obj.body, { headers });
+});
+
+api.delete("/attachments/:aid", async (c) => {
+  const aid = Number(c.req.param("aid"));
+  const row = await c.env.DB
+    .prepare("SELECT r2_key, trip_id FROM expense_attachments WHERE id = ?")
+    .bind(aid)
+    .first<{ r2_key: string; trip_id: number }>();
+  if (!row) return c.json(bad("attachment not found"), 404);
+  await c.env.RECEIPTS.delete(row.r2_key);
+  await c.env.DB.prepare("DELETE FROM expense_attachments WHERE id = ?").bind(aid).run();
+  return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
 api.patch("/expenses/:eid", async (c) => {
@@ -365,6 +482,14 @@ api.delete("/expenses/:eid", async (c) => {
   const eid = Number(c.req.param("eid"));
   const row = await c.env.DB.prepare("SELECT trip_id FROM expenses WHERE id = ?").bind(eid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("expense not found"), 404);
+  // Cascade removes the attachment rows, but D1 can't reach R2 — purge the
+  // objects first so they aren't orphaned.
+  const keys = await c.env.DB
+    .prepare("SELECT r2_key FROM expense_attachments WHERE expense_id = ?")
+    .bind(eid)
+    .all<{ r2_key: string }>();
+  const keyList = (keys.results ?? []).map((k) => k.r2_key);
+  if (keyList.length) await c.env.RECEIPTS.delete(keyList);
   await c.env.DB.prepare("DELETE FROM expenses WHERE id = ?").bind(eid).run();
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
