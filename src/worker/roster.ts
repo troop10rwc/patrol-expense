@@ -4,6 +4,13 @@ import type { RosterMember } from "../shared/types.ts";
 // keyed by bsa_number. Youth carry a `relationships` JSON array of guardians;
 // the FIRST guardian is treated as the billable adult (verified to match the
 // source spreadsheet's attribution).
+//
+// Exception — adult-age youth: a youth who is 18+ and has NO registered
+// guardian (e.g. an adult-age Crew member) has no one to roll their share up
+// to, so we classify them as an `adult` here. That makes them a self-paying
+// payer everywhere downstream (paysheet rows, share attribution, statements)
+// instead of being silently dropped for lack of a responsible adult. A youth
+// under 18, or one who still has a guardian on file, is unaffected.
 
 interface RelationshipJson {
   bsaNumber?: string;
@@ -34,6 +41,44 @@ function firstGuardian(relationshipsJson: string | null): RosterMember["guardian
   };
 }
 
+/** True when `dob` (an ISO `YYYY-MM-DD`) is on/before the 18th-birthday cutoff
+ *  relative to `asOf` — i.e. the person is at least 18. Bad/missing dates are
+ *  treated as not-adult (the safe default: keep normal youth handling). */
+function isAdultAge(dob: string | null | undefined, asOf: Date): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dob ?? "");
+  if (!m) return false;
+  const eighteenth = Date.UTC(Number(m[1]) + 18, Number(m[2]) - 1, Number(m[3]));
+  return eighteenth <= asOf.getTime();
+}
+
+interface YouthRow {
+  bsa_number: string;
+  first_name: string;
+  last_name: string;
+  rank: string | null;
+  patrol: string | null;
+  units: string;
+  relationships: string;
+  date_of_birth: string | null;
+}
+
+/** Build a RosterMember from a youth_members row, applying the adult-age
+ *  exception: an 18+ youth with no registered guardian becomes an `adult`. */
+function memberFromYouthRow(y: YouthRow, asOf: Date): RosterMember {
+  const guardian = firstGuardian(y.relationships);
+  const base = {
+    bsa_number: y.bsa_number,
+    first_name: y.first_name,
+    last_name: y.last_name,
+    name: `${y.first_name} ${y.last_name}`.trim(),
+    units: parseJsonArray<string>(y.units),
+  };
+  if (guardian == null && isAdultAge(y.date_of_birth, asOf)) {
+    return { ...base, type: "adult", email: null };
+  }
+  return { ...base, type: "scout", email: null, patrol: y.patrol, rank: y.rank, guardian };
+}
+
 function placeholders(n: number): string {
   return Array.from({ length: n }, () => "?").join(", ");
 }
@@ -55,16 +100,13 @@ export async function fetchRoster(roster: D1Database, units: string[]): Promise<
 
   const youthRes = await roster
     .prepare(
-      `SELECT DISTINCT y.bsa_number, y.first_name, y.last_name, y.rank, y.patrol, y.units, y.relationships
+      `SELECT DISTINCT y.bsa_number, y.first_name, y.last_name, y.rank, y.patrol, y.units, y.relationships, y.date_of_birth
        FROM youth_members y
        JOIN unit_youth_members u ON u.bsa_number = y.bsa_number
        WHERE u.unit_name IN (${ph})`,
     )
     .bind(...units)
-    .all<{
-      bsa_number: string; first_name: string; last_name: string;
-      rank: string | null; patrol: string | null; units: string; relationships: string;
-    }>();
+    .all<YouthRow>();
 
   const adults: RosterMember[] = adultsRes.results.map((a) => ({
     bsa_number: a.bsa_number,
@@ -76,18 +118,8 @@ export async function fetchRoster(roster: D1Database, units: string[]): Promise<
     units: parseJsonArray<string>(a.units),
   }));
 
-  const youth: RosterMember[] = youthRes.results.map((y) => ({
-    bsa_number: y.bsa_number,
-    first_name: y.first_name,
-    last_name: y.last_name,
-    name: `${y.first_name} ${y.last_name}`.trim(),
-    type: "scout",
-    email: null,
-    units: parseJsonArray<string>(y.units),
-    patrol: y.patrol,
-    rank: y.rank,
-    guardian: firstGuardian(y.relationships),
-  }));
+  const now = new Date();
+  const youth: RosterMember[] = youthRes.results.map((y) => memberFromYouthRow(y, now));
 
   return [...adults, ...youth].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -110,25 +142,11 @@ export async function fetchRosterMember(roster: D1Database, bsa: string): Promis
     };
   }
   const y = await roster
-    .prepare("SELECT bsa_number, first_name, last_name, rank, patrol, units, relationships FROM youth_members WHERE bsa_number = ?")
+    .prepare("SELECT bsa_number, first_name, last_name, rank, patrol, units, relationships, date_of_birth FROM youth_members WHERE bsa_number = ?")
     .bind(bsa)
-    .first<{
-      bsa_number: string; first_name: string; last_name: string;
-      rank: string | null; patrol: string | null; units: string; relationships: string;
-    }>();
+    .first<YouthRow>();
   if (y) {
-    return {
-      bsa_number: y.bsa_number,
-      first_name: y.first_name,
-      last_name: y.last_name,
-      name: `${y.first_name} ${y.last_name}`.trim(),
-      type: "scout",
-      email: null,
-      units: parseJsonArray<string>(y.units),
-      patrol: y.patrol,
-      rank: y.rank,
-      guardian: firstGuardian(y.relationships),
-    };
+    return memberFromYouthRow(y, new Date());
   }
   return null;
 }
