@@ -623,6 +623,7 @@ function TripView({ uuid }: { uuid: string }) {
     return (TAB_ORDER as string[]).includes(h) ? h : "patrols";
   });
   const [titleDraft, setTitleDraft] = useState("");
+  const titleCancelled = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -672,6 +673,8 @@ function TripView({ uuid }: { uuid: string }) {
 
   function saveTitle() {
     if (!bundle) return;
+    // Escape blurs into this handler before its setTitleDraft has landed.
+    if (titleCancelled.current) { titleCancelled.current = false; setTitleDraft(bundle.trip.name); return; }
     const next = titleDraft.trim();
     if (!next || next === bundle.trip.name) {
       setTitleDraft(bundle.trip.name);
@@ -704,7 +707,7 @@ function TripView({ uuid }: { uuid: string }) {
             onBlur={saveTitle}
             onKeyDown={(e) => {
               if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
-              if (e.key === "Escape") { setTitleDraft(t.name); (e.currentTarget as HTMLInputElement).blur(); }
+              if (e.key === "Escape") { titleCancelled.current = true; (e.currentTarget as HTMLInputElement).blur(); }
             }}
             aria-label="Trip title"
             disabled={busy}
@@ -1816,7 +1819,8 @@ function Patrols({ bundle, roster, run, busy }: TabProps) {
         A group's expenses are split by shares, derived from who attended. Add adults and
         youth via the autocomplete — or paste a list of names/emails to bulk-add. Each
         attendee is one share, billed to the responsible adult (a youth → their parent;
-        an adult → themselves).
+        an adult → themselves). Click a group's name to rename it — expenses and
+        attendance stay put.
       </small></p>
 
       <div className="row" style={{ marginBottom: 8 }}>
@@ -1961,6 +1965,41 @@ function PersonPicker({
   );
 }
 
+/**
+ * Inline rename for a cost group. Saves on blur / Enter, reverts on Escape or
+ * an empty value. The PATCH sends only `name`, so nothing else on the group is
+ * touched.
+ */
+function GroupNameInput({ group, run, busy }: { group: CostGroup; run: TabProps["run"]; busy: boolean }) {
+  const [draft, setDraft] = useState(group.name);
+  useEffect(() => setDraft(group.name), [group.id, group.name]);
+  // Escape blurs, and blur saves — so flag the cancel for the blur that follows
+  // (setDraft hasn't landed yet at that point, so `draft` is still the edit).
+  const cancelled = useRef(false);
+
+  function save() {
+    if (cancelled.current) { cancelled.current = false; setDraft(group.name); return; }
+    const next = draft.trim();
+    if (!next || next === group.name) { setDraft(group.name); return; }
+    run(() => api.updateGroup(group.id, { name: next }));
+  }
+
+  return (
+    <input
+      className="name-input"
+      value={draft}
+      disabled={busy}
+      aria-label={`${group.kind} name`}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") { cancelled.current = true; e.currentTarget.blur(); }
+      }}
+    />
+  );
+}
+
 function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup } & TabProps) {
   const { personById } = useMaps(bundle);
   const summary = bundle.groupSummaries.find((s) => s.group.id === group.id)!;
@@ -2000,7 +2039,7 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
   return (
     <div style={{ borderTop: "1px solid var(--line)", paddingTop: 12, marginTop: 12 }}>
       <div className="toolbar" style={{ marginBottom: 8 }}>
-        <strong>{group.name}</strong>
+        <GroupNameInput group={group} run={run} busy={busy} />
         <span className="pill">{group.kind}</span>
         <span className="hint">
           {money(summary.total)} · {summary.totalShares} shares
