@@ -106,6 +106,12 @@ export const api = {
     return req<TripBundle>(`/api/trips/${tripId}/expenses`, { method: "POST", body: JSON.stringify(body) });
   },
   deleteExpense: (eid: number) => req<TripBundle>(`/api/expenses/${eid}`, { method: "DELETE" }),
+  // Re-charge a batch of hand-entered receipts to another cost group.
+  moveExpenses: (tripId: number, ids: number[], group_id: number) =>
+    req<TripBundle>(`/api/trips/${tripId}/expenses/move`, {
+      method: "POST",
+      body: JSON.stringify({ ids, group_id }),
+    }),
 
   // ---- expense attachments (receipts) ----
   uploadAttachments: (eid: number, files: File[]) => {
