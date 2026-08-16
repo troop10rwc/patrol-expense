@@ -465,6 +465,40 @@ api.delete("/attachments/:aid", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
+// Bulk re-charge receipts to a different cost group (Unit <-> a patrol). Only
+// hand-entered receipts move: travel-generated rows are owned by their travel
+// group's cost_group_id and would be rewritten on the next recalculation.
+api.post("/trips/:id/expenses/move", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const b = await c.req.json<{ ids?: number[]; group_id?: number }>();
+  const ids = (b.ids ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const groupId = Number(b.group_id);
+  if (!groupId || ids.length === 0) return c.json(bad("ids and group_id are required"), 400);
+
+  const dest = await c.env.DB
+    .prepare("SELECT kind FROM cost_groups WHERE id = ? AND trip_id = ?")
+    .bind(groupId, tripId)
+    .first<{ kind: string }>();
+  if (!dest) return c.json(bad("destination group not found"), 404);
+  if (dest.kind === "travel") return c.json(bad("cannot charge receipts to a travel group"), 400);
+
+  const placeholders = ids.map(() => "?").join(",");
+  const movable = await c.env.DB
+    .prepare(
+      `SELECT id FROM expenses WHERE trip_id = ? AND source_travel_group_id IS NULL AND id IN (${placeholders})`,
+    )
+    .bind(tripId, ...ids)
+    .all<{ id: number }>();
+  const movableIds = (movable.results ?? []).map((r) => r.id);
+  if (movableIds.length !== ids.length)
+    return c.json(bad("some receipts are not movable (unknown, on another trip, or travel-generated)"), 400);
+
+  await c.env.DB.batch(
+    movableIds.map((id) => c.env.DB.prepare("UPDATE expenses SET group_id = ? WHERE id = ?").bind(groupId, id)),
+  );
+  return c.json(await bundleResponse(c.env.DB, tripId));
+});
+
 api.patch("/expenses/:eid", async (c) => {
   const eid = Number(c.req.param("eid"));
   const b = await c.req.json<{ group_id?: number; description?: string; amount?: number; payer_id?: number }>();

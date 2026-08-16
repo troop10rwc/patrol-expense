@@ -315,3 +315,19 @@ tr.snapshot-detail table { margin: 0; background: var(--t10-surface); border: 1p
 }
 .attachment-x:hover { color: var(--t10-clay-deep); }
 .attachment-x:disabled { opacity: .5; cursor: default; }
+
+/* ---- Receipt edit mode (bulk move between cost groups) ---- */
+.move-bar {
+  display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
+  background: var(--t10-surface-2); border: 1px solid var(--t10-line-soft);
+  border-radius: var(--t10-r-sm); padding: 10px 12px; margin-bottom: 6px;
+}
+.move-bar .hint { font-size: var(--t10-fs-xs); flex: 1 1 200px; }
+.move-count {
+  font-family: var(--t10-font-mono); font-size: var(--t10-fs-sm);
+  color: var(--t10-ink-soft); padding-bottom: 7px; white-space: nowrap;
+}
+th.check-col, td.check-col { width: 1%; padding-right: 0; }
+.check-col input[type="checkbox"] { width: auto; margin: 0; vertical-align: middle; cursor: pointer; }
+tbody tr.selected td { background: var(--t10-surface-3); }
+tbody tr.selected:hover td { background: var(--t10-surface-3); }

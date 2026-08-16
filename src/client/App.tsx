@@ -1314,8 +1314,37 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   const [amount, setAmount] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Edit mode: pick receipts with checkboxes, then re-charge them to another
+  // cost group. Travel-generated rows aren't selectable — their group is owned
+  // by the travel calculator.
+  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [moveTo, setMoveTo] = useState<number>(0);
 
   const effectivePayer = payerRef || adultPool[0]?.ref || "";
+  const movable = (e: Expense) => !e.source_travel_group_id;
+  // A stale id (receipt deleted elsewhere) must never reach the move call.
+  const selectedIds = bundle.expenses.filter((e) => movable(e) && selected.has(e.id)).map((e) => e.id);
+  const destination = costGroups.find((g) => g.id === moveTo) ?? costGroups[0];
+
+  function toggle(id: number, on: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function stopEditing() {
+    setEditing(false);
+    setSelected(new Set());
+  }
+
+  function move() {
+    if (!destination || selectedIds.length === 0) return;
+    run(() => api.moveExpenses(bundle.trip.id, selectedIds, destination.id)).then(() => setSelected(new Set()));
+  }
 
   function add() {
     const amt = parseFloat(amount);
@@ -1363,20 +1392,78 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
         <button className="btn" disabled={busy} onClick={add}>Add</button>
       </div>
 
+      {bundle.expenses.length > 0 && (
+        <div className="toolbar" style={{ marginTop: 22 }}>
+          <h2 style={{ margin: 0 }}>Receipts</h2>
+          <div className="spacer" />
+          {editing ? (
+            <button className="btn ghost" disabled={busy} onClick={stopEditing}>Done</button>
+          ) : (
+            <button className="btn ghost" disabled={busy} onClick={() => setEditing(true)}>Edit</button>
+          )}
+        </div>
+      )}
+
+      {editing && (
+        <div className="move-bar">
+          <span className="move-count">{selectedIds.length} selected</span>
+          <label className="fld">Move to
+            <select value={destination?.id ?? 0} onChange={(e) => setMoveTo(Number(e.target.value))}>
+              {costGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+          </label>
+          <button className="btn" disabled={busy || selectedIds.length === 0 || !destination} onClick={move}>
+            Move{selectedIds.length > 0 && destination ? ` ${selectedIds.length} to ${destination.name}` : ""}
+          </button>
+          {selectedIds.length > 0 && (
+            <button className="btn ghost" disabled={busy} onClick={() => setSelected(new Set())}>Clear</button>
+          )}
+          <span className="hint">Auto travel receipts can't be moved — change the travel group's cost group instead.</span>
+        </div>
+      )}
+
       {bundle.groups.map((g) => {
         const rows = bundle.expenses.filter((e) => e.group_id === g.id);
         if (rows.length === 0) return null;
         const summary = bundle.groupSummaries.find((s) => s.group.id === g.id)!;
+        const groupMovable = rows.filter(movable);
+        const allChecked = groupMovable.length > 0 && groupMovable.every((e) => selected.has(e.id));
         return (
           <div key={g.id}>
             <h3>{g.name} — {money(summary.total)}{summary.totalShares > 0 && <> · {money(summary.perShare)}/share ({summary.totalShares} shares)</>}</h3>
             <table>
               <thead>
-                <tr><th>Receipt</th><th>Paid by</th><th className="num">Amount</th><th>Files</th><th></th></tr>
+                <tr>
+                  {editing && (
+                    <th className="check-col">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select all receipts in ${g.name}`}
+                        disabled={busy || groupMovable.length === 0}
+                        checked={allChecked}
+                        onChange={(ev) => groupMovable.forEach((e) => toggle(e.id, ev.target.checked))}
+                      />
+                    </th>
+                  )}
+                  <th>Receipt</th><th>Paid by</th><th className="num">Amount</th><th>Files</th><th></th>
+                </tr>
               </thead>
               <tbody>
                 {rows.map((e) => (
-                  <tr key={e.id}>
+                  <tr key={e.id} className={editing && selected.has(e.id) ? "selected" : undefined}>
+                    {editing && (
+                      <td className="check-col">
+                        {movable(e) && (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${e.description}`}
+                            disabled={busy}
+                            checked={selected.has(e.id)}
+                            onChange={(ev) => toggle(e.id, ev.target.checked)}
+                          />
+                        )}
+                      </td>
+                    )}
                     <td>{e.description}{e.source_travel_group_id && <span className="pill" style={{ marginLeft: 6 }}>auto</span>}</td>
                     <td>{personById.get(e.payer_id)?.name ?? "?"}</td>
                     <td className="num">{money(e.amount)}</td>
