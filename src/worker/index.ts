@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
-import type { Trip, TripBundle, SnapshotMeta, ImportPreview, OutstandingExpense } from "../shared/types.ts";
+import type { CostGroup, Trip, TripBundle, SnapshotMeta, ImportPreview, OutstandingExpense } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
@@ -233,12 +233,12 @@ api.delete("/people/:pid", async (c) => {
 api.post("/trips/:id/groups", async (c) => {
   const tripId = Number(c.req.param("id"));
   const b = await c.req.json<any>();
-  if (!b.name || !b.kind) return c.json(bad("name and kind are required"), 400);
+  if (!b.name?.trim() || !b.kind) return c.json(bad("name and kind are required"), 400);
   const res = await c.env.DB.prepare(
     "INSERT INTO cost_groups (trip_id, name, kind, sort_order, origin, destination, one_way_miles, round_trip_miles, tolls, rate_override, cost_group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
     .bind(
-      tripId, b.name, b.kind, b.sort_order ?? 0,
+      tripId, b.name.trim(), b.kind, b.sort_order ?? 0,
       b.origin ?? null, b.destination ?? null, b.one_way_miles ?? null,
       b.round_trip_miles ?? null, b.tolls ?? 0, b.rate_override ?? null, b.cost_group_id ?? null,
     )
@@ -247,27 +247,39 @@ api.post("/trips/:id/groups", async (c) => {
   return c.json(await bundleResponse(c.env.DB, tripId), 201);
 });
 
+// Read-merge-write patch so a missing field doesn't null a column — a rename
+// alone must not wipe a travel group's route. `kind` is immutable.
 api.patch("/groups/:gid", async (c) => {
   const gid = Number(c.req.param("gid"));
-  const b = await c.req.json<any>();
-  const row = await c.env.DB.prepare("SELECT trip_id, kind FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number; kind: string }>();
-  if (!row) return c.json(bad("group not found"), 404);
+  const b = await c.req.json<Partial<CostGroup>>();
+  const current = await c.env.DB.prepare("SELECT * FROM cost_groups WHERE id = ?").bind(gid).first<CostGroup>();
+  if (!current) return c.json(bad("group not found"), 404);
+  if (b.name !== undefined && !String(b.name).trim()) return c.json(bad("name cannot be empty"), 400);
+  const merged: CostGroup = {
+    ...current,
+    ...(b.name !== undefined ? { name: String(b.name).trim() } : {}),
+    ...(b.sort_order !== undefined ? { sort_order: b.sort_order } : {}),
+    ...(b.origin !== undefined ? { origin: b.origin } : {}),
+    ...(b.destination !== undefined ? { destination: b.destination } : {}),
+    ...(b.one_way_miles !== undefined ? { one_way_miles: b.one_way_miles } : {}),
+    ...(b.round_trip_miles !== undefined ? { round_trip_miles: b.round_trip_miles } : {}),
+    ...(b.tolls !== undefined ? { tolls: b.tolls } : {}),
+    ...(b.rate_override !== undefined ? { rate_override: b.rate_override } : {}),
+    ...(b.cost_group_id !== undefined ? { cost_group_id: b.cost_group_id } : {}),
+  };
   await c.env.DB.prepare(
     `UPDATE cost_groups SET
-       name = COALESCE(?, name),
-       sort_order = COALESCE(?, sort_order),
-       origin = ?, destination = ?, one_way_miles = ?, round_trip_miles = ?,
-       tolls = COALESCE(?, tolls), rate_override = ?, cost_group_id = ?
+       name = ?, sort_order = ?, origin = ?, destination = ?, one_way_miles = ?,
+       round_trip_miles = ?, tolls = ?, rate_override = ?, cost_group_id = ?
      WHERE id = ?`,
   )
     .bind(
-      b.name ?? null, b.sort_order ?? null, b.origin ?? null, b.destination ?? null,
-      b.one_way_miles ?? null, b.round_trip_miles ?? null, b.tolls ?? null,
-      b.rate_override ?? null, b.cost_group_id ?? null, gid,
+      merged.name, merged.sort_order, merged.origin, merged.destination, merged.one_way_miles,
+      merged.round_trip_miles, merged.tolls, merged.rate_override, merged.cost_group_id, gid,
     )
     .run();
-  if (row.kind === "travel") await regenerateTravelExpenses(c.env.DB, gid);
-  return c.json(await bundleResponse(c.env.DB, row.trip_id));
+  if (current.kind === "travel") await regenerateTravelExpenses(c.env.DB, gid);
+  return c.json(await bundleResponse(c.env.DB, current.trip_id));
 });
 
 api.delete("/groups/:gid", async (c) => {

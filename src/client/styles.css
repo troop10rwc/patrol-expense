@@ -68,6 +68,17 @@ input.title-input:hover { border-bottom-color: var(--t10-line); }
 input.title-input:focus { outline: none; border-bottom-color: var(--t10-pine); }
 input.title-input:disabled { opacity: 1; background: transparent; }
 
+/* Inline-editable cost group / route name — same affordance as the trip title,
+   at body scale so it sits in a section header. */
+input.name-input {
+  font: inherit; font-weight: 700; color: var(--t10-ink);
+  border: 0; background: transparent; padding: 0 0 2px; margin: 0;
+  border-bottom: 2px solid transparent; min-width: 120px; max-width: 340px;
+}
+input.name-input:hover { border-bottom-color: var(--t10-line); }
+input.name-input:focus { outline: none; border-bottom-color: var(--t10-pine); }
+input.name-input:disabled { opacity: 1; background: transparent; }
+
 a.back-link { font-size: var(--t10-fs-xs); color: var(--t10-ink-faint); font-family: var(--t10-font-mono); }
 a.back-link:hover { color: var(--t10-pine); }
 
