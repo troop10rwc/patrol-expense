@@ -342,3 +342,71 @@ th.check-col, td.check-col { width: 1%; padding-right: 0; }
 .check-col input[type="checkbox"] { width: auto; margin: 0; vertical-align: middle; cursor: pointer; }
 tbody tr.selected td { background: var(--t10-surface-3); }
 tbody tr.selected:hover td { background: var(--t10-surface-3); }
+
+/* ---- Reimbursement notices (the emailed statement + its corrections) ---- */
+td.notice-cell { white-space: nowrap; }
+td.notice-cell .pill { margin-left: 6px; vertical-align: middle; }
+td.correction-msg { white-space: pre-wrap; max-width: 420px; }
+
+/* Caution that isn't an error: the action is allowed, the leader just needs to
+   know what they're about to send (stale figures, no payment details). */
+.warn-note {
+  border-left: 2px solid var(--t10-amber, var(--t10-clay));
+  background: var(--t10-amber-tint, var(--t10-surface-2));
+  padding: 7px 10px; border-radius: var(--t10-r-sm); margin: 0 0 10px;
+}
+
+.notice-modal { max-width: 720px; max-height: 84vh; overflow-y: auto; }
+
+/* Formatted / Plain text switch over the preview. */
+.preview-tabs { display: flex; gap: 2px; margin: 12px 0 0; border-bottom: 1px solid var(--t10-line); }
+.preview-tab {
+  font-family: var(--t10-font-display); font-size: 10px; font-weight: 700;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--t10-ink-faint);
+  padding: 6px 10px; border: none; border-bottom: 2px solid transparent; background: none; cursor: pointer;
+}
+.preview-tab:hover { color: var(--t10-ink); }
+.preview-tab.on { color: var(--t10-pine-deep); border-bottom-color: var(--t10-clay); }
+
+/* The email rendered as a mail client will draw it. Sandboxed so its inline
+   styles and the app's stylesheet stay out of each other's way. */
+.notice-preview {
+  display: block; width: 100%; height: 44vh; min-height: 320px;
+  border: 1px solid var(--t10-line-soft); border-radius: var(--t10-r-sm);
+  background: #faf8f1; margin-top: 0;
+}
+.notice-modal label.fld input[readonly] { background: var(--t10-surface-2); color: var(--t10-ink-soft); }
+/* The email exactly as it will arrive — monospace and preserved wrapping, so
+   the preview is the deliverable, not an approximation of it. */
+.notice-body {
+  font-family: var(--t10-font-mono); font-size: 11.5px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--t10-surface-2); border: 1px solid var(--t10-line-soft);
+  border-radius: var(--t10-r-sm); padding: 12px 14px; margin: 0;
+  max-height: 40vh; overflow-y: auto;
+}
+
+/* ---- Shared statement (public, no sign-in) ---- */
+.wrap.shared { max-width: 720px; }
+.shared-head { margin-bottom: 18px; }
+.shared-head h1 { font-family: var(--t10-font-display); font-weight: 800; margin: 0 0 4px; }
+.shared-head .meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--t10-ink-soft); font-size: var(--t10-fs-sm); }
+.wrap.shared .stmt-total .hint { margin: 10px 0 0; }
+tr.shared-total td { border-bottom: none; border-top: 1px solid var(--t10-line); }
+
+.share-line { padding: 10px 0; border-bottom: 1px solid var(--t10-line-soft); }
+.share-line:last-of-type { border-bottom: none; }
+.share-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.share-head .num { font-family: var(--t10-font-mono); font-variant-numeric: tabular-nums; }
+.share-line details { margin-top: 6px; }
+.share-line summary { font-size: var(--t10-fs-xs); color: var(--t10-ink-soft); cursor: pointer; }
+.share-line details table { margin-top: 4px; }
+
+.pay-instructions { white-space: pre-wrap; margin: 0; }
+.reported { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.reported li { font-size: var(--t10-fs-sm); color: var(--t10-ink-soft); }
+label.fld textarea {
+  font: inherit; font-family: var(--t10-font-body); font-size: var(--t10-fs-sm);
+  font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--t10-ink);
+  width: 100%; resize: vertical;
+}

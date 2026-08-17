@@ -56,6 +56,48 @@ app must be served under **`*.troop10rwc.org`** — a `*.workers.dev` host can n
 receive it. That's why `workers_dev`/`preview_urls` are off: an authenticated
 preview must be served from a `*.troop10rwc.org` route, not a workers.dev URL.
 
+## Reimbursement notices (per-person emails)
+
+Each row on the **Reimbursement** tab with a nonzero net gets an **✉ Email**
+button. It prepares that person's notice and previews it as the recipient will
+see it. The app never sends mail itself: the treasurer sends from their own
+client, so replies (the easiest way to attach a missing receipt) reach a human.
+
+The email is **deliberately high level** — the headline amount, which cost
+groups the share covers, the three or four figures that net out to it, and then
+links. Every receipt and per-group split lives on the statement page, so the
+message stays skimmable on a phone.
+
+**Delivery is a rich clipboard copy.** `mailto:` can only carry plain text
+(RFC 6068), so *Copy formatted email* writes both `text/html` and `text/plain`
+flavors to the clipboard — pasting into Gmail/Outlook/Apple Mail keeps the
+formatting. *Open plain-text draft* is the mailto fallback for clients that
+won't take a paste. Both renderings come from `src/worker/notice.ts` and carry
+identical content; the modal previews either. The HTML is built for mail
+clients, not browsers: table layout, inline styles only, no classes, webfonts,
+flexbox, or `<style>` block.
+
+**Notices are always cut from a snapshot, never live data** — an email quotes an
+amount, so the arithmetic behind it has to stay re-readable afterwards. If a trip
+has no snapshot yet, preparing a notice returns `409`; take one first.
+
+Every email carries a **shared statement link** (`/manage/expenses/s/<token>`),
+the app's only unauthenticated surface. Recipients include parents with no
+identity account, so the token *is* the credential: it authorizes exactly one
+person's figures for one snapshot, and the page re-derives everything from that
+frozen bundle, so the page and the email can never disagree. Links are stored
+(`statement_links`), reused per (snapshot, person), and revocable from the modal.
+Deleting a snapshot invalidates the links cut from it.
+
+Recipients report problems two ways: reply to the email, or its "report it here"
+link (`/s/<token>#report`, which jumps to the **Report a correction** form). Form
+reports are inert — they queue a claim in `corrections` for the *Reported
+corrections* review queue on the Reimbursement tab and never touch an expense.
+Fix the receipt on the Expenses tab, snapshot again, then re-send.
+
+Payment instructions are per-trip (⚙ Settings), reproduced verbatim in notices
+for anyone who owes, and copied forward to each new trip.
+
 ## Production deploy
 
 1. **D1**: `wrangler d1 create patrol_expense`, then put the returned id into
