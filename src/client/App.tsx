@@ -14,9 +14,15 @@ import type {
   ImportPreview,
   PersonStatement,
   StatementEvent,
+  PersonNotice,
+  NoticeLink,
+  Correction,
+  CorrectionKind,
+  PublicStatement,
+  PaysheetRow,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
-import { api, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
+import { api, publicApi, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 import { BackOfficeTopNav } from "@troop10rwc/ui";
 
@@ -38,11 +44,22 @@ function appPath(): string {
   return (p.startsWith(BASE_PATH) ? p.slice(BASE_PATH.length) : p) || "/";
 }
 
+// A shared statement link (/s/<token>) is matched before anything else: it
+// exists precisely so someone with no troop account — a parent emailed a link —
+// can see why they owe, so it must skip the sign-in bounce in BackOffice below.
+const PUBLIC_STATEMENT_RE = /^\/s\/([A-Za-z0-9_-]{16,64})$/;
+
+export function App() {
+  const shared = appPath().match(PUBLIC_STATEMENT_RE);
+  if (shared) return <div className="t10-app"><PublicStatementPage token={shared[1]} /></div>;
+  return <BackOffice />;
+}
+
 // Member sessions are minted by the shared identity service (id.troop10rwc.org)
 // and validated server-side per request (see src/worker/auth.ts). On load we ask
 // who we are; a 401 means no live session, so we bounce the browser to the
 // identity service's login page, which returns here once signed in.
-export function App() {
+function BackOffice() {
   const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined=loading
   useEffect(() => {
     api.me()
@@ -312,6 +329,298 @@ function StatementEventCard({ ev }: { ev: StatementEvent }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- Shared statement
+// What a reimbursement email links to. No sign-in: the token in the URL is the
+// credential, so this renders for a parent with no troop account.
+//
+// Every figure here is re-derived from the same frozen snapshot the email was
+// cut from — the page and the email can't drift apart — except the "other
+// trips" roll-up, which is current by nature and labelled as such.
+function PublicStatementPage({ token }: { token: string }) {
+  const [st, setSt] = useState<PublicStatement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const jumped = useRef(false);
+
+  useEffect(() => {
+    publicApi.statement(token).then(setSt).catch((e) => setError(String(e)));
+  }, [token]);
+
+  // The email's "report it here" link targets #report, but the form doesn't
+  // exist until the statement has loaded — by then the browser has long since
+  // given up on the fragment. Do the jump ourselves, once, so that link lands
+  // on the form instead of the top of the page.
+  useEffect(() => {
+    if (!st || jumped.current || location.hash !== "#report") return;
+    jumped.current = true;
+    document.getElementById("report")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [st]);
+
+  if (error)
+    return (
+      <div className="wrap shared">
+        <h1>Troop 10 Expenses</h1>
+        <div className="err">{error}</div>
+        <p className="hint">
+          Statement links are tied to a specific summary. If this one has been replaced or withdrawn,
+          ask the trip's treasurer to send you a fresh one.
+        </p>
+      </div>
+    );
+  if (!st) return <div className="wrap shared">Loading…</div>;
+
+  const n = st.notice;
+  const owes = n.net < -0.005;
+  const owed = n.net > 0.005;
+
+  return (
+    <div className="wrap shared">
+      <header className="shared-head">
+        <h1>{n.trip.name}</h1>
+        <div className="meta">
+          <span>Expense statement for {n.person.name}</span>
+          {n.trip.trip_date && <span>{n.trip.trip_date}</span>}
+        </div>
+      </header>
+
+      <div className="card stmt-total">
+        <div className="stmt-total-label">
+          {owes ? "You owe the troop" : owed ? "The troop owes you" : "You're all settled"}
+        </div>
+        <div className={`stmt-total-amt ${owes ? "neg" : ""}`}>{money(Math.abs(n.net))}</div>
+        <p className="hint">
+          Frozen from the summary taken {fmtTime(n.snapshot.created_at)}
+          {n.snapshot.label ? ` (${n.snapshot.label})` : ""}. Later changes to the trip won't move
+          this number until a new statement is sent.
+        </p>
+      </div>
+
+      {st.otherEvents.length > 0 && (
+        <div className="card">
+          <h2>Everything you owe</h2>
+          <table>
+            <tbody>
+              <tr>
+                <td>{n.trip.name} <span className="hint">(this statement)</span></td>
+                <td className="num">{accounting(n.net)}</td>
+              </tr>
+              {st.otherEvents.map((e) => (
+                <tr key={e.name}>
+                  <td>{e.name} <span className="hint">{e.trip_date ?? "current figures"}</span></td>
+                  <td className="num">{accounting(e.outstanding)}</td>
+                </tr>
+              ))}
+              <tr className="shared-total">
+                <td><strong>Total</strong></td>
+                <td className="num"><strong className={st.grandTotal < 0 ? "neg" : "pos"}>{accounting(st.grandTotal)}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+          <p><small className="hint">
+            Amounts in parentheses are what you owe. Other trips show their current figures, which
+            can still move as those trips collect expenses.
+          </small></p>
+        </div>
+      )}
+
+      {n.shareLines.length > 0 && (
+        <div className="card">
+          <h2>Your share of trip costs — {money(n.owed)}</h2>
+          <p className="hint">
+            The trip cost {money(n.tripTotal)} in total. Each group's costs are split evenly across
+            everyone in it; you cover your own share plus any youth you're responsible for.
+          </p>
+          {n.shareLines.map((l) => (
+            <div className="share-line" key={l.group_id}>
+              <div className="share-head">
+                <strong>{l.groupName}</strong>
+                <span className="num">{money(l.subtotal)}</span>
+              </div>
+              <div className="hint">
+                {money(l.groupTotal)} split {l.totalShares} ways = {money(l.perShare)} each; you cover{" "}
+                {l.shareCount}
+                {l.covers.length > 0 && ` (${l.covers.join(", ")})`}
+              </div>
+              {l.expenses.length > 0 && (
+                <details>
+                  <summary>{l.expenses.length} receipt{l.expenses.length === 1 ? "" : "s"} in this group</summary>
+                  <table>
+                    <tbody>
+                      {l.expenses.map((e, i) => (
+                        <tr key={i}>
+                          <td>{e.description}</td>
+                          <td className="hint">paid by {e.payer}</td>
+                          <td className="num">{money(e.amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {n.paidLines.length > 0 && (
+        <div className="card">
+          <h2>Receipts you paid — {money(n.paid)}</h2>
+          <table>
+            <tbody>
+              {n.paidLines.map((l, i) => (
+                <tr key={i}>
+                  <td>{l.description}</td>
+                  <td className="hint">{l.groupName}</td>
+                  <td className="num">{money(l.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {n.prepayLines.length > 0 && (
+        <div className="card">
+          <h2>Already reimbursed — {money(n.prepay)}</h2>
+          <table>
+            <tbody>
+              {n.prepayLines.map((l, i) => (
+                <tr key={i}><td>{l.note || "Reimbursement"}</td><td className="num">{money(l.amount)}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="card">
+        <h2>How this adds up</h2>
+        <table>
+          <tbody>
+            <tr><td>Receipts you paid</td><td className="num">{money(n.paid)}</td></tr>
+            <tr><td>Your share of costs</td><td className="num">−{money(n.owed)}</td></tr>
+            {n.prepay > 0 && <tr><td>Already reimbursed to you</td><td className="num">−{money(n.prepay)}</td></tr>}
+            <tr className="shared-total">
+              <td><strong>{owes ? "You owe" : owed ? "Owed to you" : "Settled"}</strong></td>
+              <td className="num"><strong className={owes ? "neg" : "pos"}>{money(Math.abs(n.net))}</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {owes && n.paymentInstructions && (
+        <div className="card">
+          <h2>How to pay</h2>
+          <p className="pay-instructions">{n.paymentInstructions}</p>
+        </div>
+      )}
+
+      <CorrectionForm token={token} statement={st} onUpdate={setSt} />
+    </div>
+  );
+}
+
+const CORRECTION_LABELS: Record<CorrectionKind, string> = {
+  missing_expense: "A receipt of mine is missing",
+  wrong_amount: "An amount looks wrong",
+  not_mine: "I shouldn't be in one of these groups",
+  other: "Something else",
+};
+
+// Report a correction from the shared page. This only ever files a claim for the
+// treasurer — it can't change an expense — so it's safe to expose to a link
+// holder, and the reporter gets their filed reports back for confirmation.
+function CorrectionForm({
+  token, statement, onUpdate,
+}: {
+  token: string;
+  statement: PublicStatement;
+  onUpdate: (s: PublicStatement) => void;
+}) {
+  const [kind, setKind] = useState<CorrectionKind>("missing_expense");
+  const [message, setMessage] = useState("");
+  const [amount, setAmount] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  async function submit() {
+    if (!message.trim() || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const next = await publicApi.reportCorrection(token, {
+        kind,
+        message: message.trim(),
+        amount: amount.trim() ? Number(amount) : null,
+        reporter_name: name.trim() || undefined,
+      });
+      onUpdate(next);
+      setMessage(""); setAmount(""); setDone(true);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    // #report is the anchor the email's "report it here" link targets, so that
+    // link lands on the form rather than the top of the page.
+    <div className="card" id="report">
+      <h2>Something missing or wrong?</h2>
+      <p className="hint">
+        Tell us here and the trip's treasurer will review it — or just reply to the email that
+        brought you here, which reaches the same person and lets you attach a photo of the receipt.
+        Filing a report doesn't change any amount by itself.
+      </p>
+
+      {statement.reported.length > 0 && (
+        <ul className="reported">
+          {statement.reported.map((r, i) => (
+            <li key={i}>
+              <span className={`pill ${r.status === "resolved" ? "pill-new" : ""}`}>{r.status}</span>{" "}
+              <strong>{CORRECTION_LABELS[r.kind]}</strong> — {r.message}{" "}
+              <span className="hint">reported {fmtTime(r.created_at)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {err && <div className="err">{err}</div>}
+      {done && !err && <p className="hint">Thanks — that's been passed on to the treasurer.</p>}
+
+      <div className="row" style={{ marginBottom: 10 }}>
+        <label className="fld" style={{ flex: 1, minWidth: 240 }}>What's wrong?
+          <select value={kind} disabled={busy} onChange={(e) => setKind(e.target.value as CorrectionKind)}>
+            {(Object.keys(CORRECTION_LABELS) as CorrectionKind[]).map((k) => (
+              <option key={k} value={k}>{CORRECTION_LABELS[k]}</option>
+            ))}
+          </select>
+        </label>
+        <label className="fld" style={{ width: 140 }}>Amount <span className="hint">(optional)</span>
+          <input value={amount} disabled={busy} inputMode="decimal" placeholder="0.00"
+            onChange={(e) => setAmount(e.target.value)} />
+        </label>
+        <label className="fld" style={{ width: 200 }}>Your name <span className="hint">(optional)</span>
+          <input value={name} disabled={busy} placeholder={statement.notice.person.name}
+            onChange={(e) => setName(e.target.value)} />
+        </label>
+      </div>
+      <label className="fld" style={{ display: "block", marginBottom: 10 }}>Details
+        <textarea
+          rows={4}
+          value={message}
+          disabled={busy}
+          placeholder="e.g. I paid $42.18 for gas on the way home and don't see it listed."
+          onChange={(e) => setMessage(e.target.value)}
+        />
+      </label>
+      <button className="btn" disabled={busy || !message.trim()} onClick={submit}>
+        {busy ? "Sending…" : "Report this"}
+      </button>
     </div>
   );
 }
@@ -839,12 +1148,22 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
   const [showAll, setShowAll] = useState(false);
   const [changes, setChanges] = useState<{ since: SnapshotMeta | null; diff: BundleDiff | null } | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotMeta[]>([]);
+  const [notices, setNotices] = useState<NoticeLink[]>([]);
+  const [corrections, setCorrections] = useState<Correction[]>([]);
+  const [noticeFor, setNoticeFor] = useState<PaysheetRow | null>(null);
 
   // Refresh the diff + snapshot list (call after taking/deleting a snapshot).
   const reload = useCallback(async () => {
-    const [ch, list] = await Promise.all([api.getChanges(tripId), api.listSnapshots(tripId)]);
+    const [ch, list, links] = await Promise.all([
+      api.getChanges(tripId), api.listSnapshots(tripId), api.listNotices(tripId),
+    ]);
     setChanges(ch);
     setSnapshots(list);
+    setNotices(links);
+  }, [tripId]);
+
+  const reloadCorrections = useCallback(async () => {
+    setCorrections(await api.listCorrections(tripId));
   }, [tripId]);
 
   // Re-derive whenever the live bundle changes (the parent hands a new bundle
@@ -853,8 +1172,25 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
     let cancelled = false;
     api.getChanges(tripId).then((c) => { if (!cancelled) setChanges(c); }).catch(() => {});
     api.listSnapshots(tripId).then((s) => { if (!cancelled) setSnapshots(s); }).catch(() => {});
+    api.listNotices(tripId).then((n) => { if (!cancelled) setNotices(n); }).catch(() => {});
+    api.listCorrections(tripId).then((c) => { if (!cancelled) setCorrections(c); }).catch(() => {});
     return () => { cancelled = true; };
   }, [bundle, tripId]);
+
+  // One link per person for the row badge. A link cut from the current snapshot
+  // wins over a merely newer one: what a leader needs to know is whether this
+  // person has the figures they're looking at, not which link was made last.
+  const noticeByPerson = useMemo(() => {
+    const currentSnap = snapshots[0]?.id;
+    const m = new Map<number, NoticeLink>();
+    for (const n of notices) {
+      const prev = m.get(n.person_id); // list arrives newest-first
+      if (!prev || (prev.snapshot_id !== currentSnap && n.snapshot_id === currentSnap)) {
+        m.set(n.person_id, n);
+      }
+    }
+    return m;
+  }, [notices, snapshots]);
 
   const changeByPerson = useMemo(() => {
     const m = new Map<number, RowChange>();
@@ -875,6 +1211,17 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
   return (
     <>
     <Snapshots bundle={bundle} changes={changes} snapshots={snapshots} reload={reload} />
+    <Corrections corrections={corrections} reload={reloadCorrections} />
+    {noticeFor && (
+      <NoticeModal
+        bundle={bundle}
+        row={noticeFor}
+        snapshots={snapshots}
+        stale={!!changes?.diff?.hasChanges}
+        onClose={() => setNoticeFor(null)}
+        onPrepared={() => { api.listNotices(tripId).then(setNotices).catch(() => {}); }}
+      />
+    )}
     <div className="card">
       <div className="kpi" style={{ marginBottom: 18 }}>
         <div><div className="k">Total expenses</div><div className="v">{money(bundle.paysheet.totalExpenses)}</div></div>
@@ -901,6 +1248,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             <th className="num">Pre-reimbursed</th>
             <th className="num">Net</th>
             <th>Settlement</th>
+            <th>Notice</th>
           </tr>
         </thead>
         <tbody>
@@ -943,11 +1291,37 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                   </select>
                   {note("status")}
                 </td>
+                {/* Email is only meaningful when there's a balance to explain;
+                    a settled row has nothing to tell anyone. */}
+                <td className="notice-cell">
+                  {Math.abs(o) > 0.005 ? (
+                    <>
+                      <button className="btn ghost sm-btn" onClick={() => setNoticeFor(r)}>
+                        ✉ Email
+                      </button>
+                      {(() => {
+                        const link = noticeByPerson.get(r.person_id);
+                        if (!link) return null;
+                        const current = link.snapshot_id === snapshots[0]?.id;
+                        return (
+                          <span
+                            className={`pill ${current ? "pill-new" : ""}`}
+                            title={`Statement link created ${fmtTime(link.created_at)}${current ? "" : " from an older snapshot"}`}
+                          >
+                            {current ? "prepared" : "older"}
+                          </span>
+                        );
+                      })()}
+                    </>
+                  ) : (
+                    <span className="hint">—</span>
+                  )}
+                </td>
               </tr>
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={6} className="empty">No activity yet.</td></tr>
+            <tr><td colSpan={7} className="empty">No activity yet.</td></tr>
           )}
         </tbody>
       </table>
@@ -958,6 +1332,324 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
       </small></p>
     </div>
     </>
+  );
+}
+
+// ------------------------------------------------------- Reimbursement notice
+// Prepare one person's email. The app never sends it: this hands back a draft
+// the treasurer sends from their own mail client, so the recipient's reply —
+// the fastest way to report a missing receipt — lands with a human who can act
+// on it, and no member ever gets mail from an address that can't be answered.
+//
+// The figures always come from a snapshot, never from live data. An email
+// quoting "$128.42" has to still be explainable next week, after the trip has
+// moved on.
+function NoticeModal({
+  bundle, row, snapshots, stale, onClose, onPrepared,
+}: {
+  bundle: TripBundle;
+  row: PaysheetRow;
+  snapshots: SnapshotMeta[];
+  stale: boolean;
+  onClose: () => void;
+  onPrepared: () => void;
+}) {
+  const [snapshotId, setSnapshotId] = useState<number | undefined>(snapshots[0]?.id);
+  const [notice, setNotice] = useState<PersonNotice | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [copied, setCopied] = useState<"rich" | "link" | null>(null);
+  const [view, setView] = useState<"rich" | "plain">("rich");
+
+  // Re-prepare whenever the chosen snapshot changes. Preparing is idempotent
+  // per (snapshot, person): it reuses the link already in someone's inbox
+  // rather than minting a second one. `onPrepared` is deliberately out of the
+  // dependency list — it's an inline callback, and refreshing the parent's list
+  // must not re-trigger this.
+  useEffect(() => {
+    let cancelled = false;
+    setBusy(true); setErr(null);
+    api.prepareNotice(bundle.trip.id, row.person_id, snapshotId)
+      .then((n) => { if (!cancelled) { setNotice(n); onPrepared(); } })
+      .catch((e) => { if (!cancelled) setErr(String(e)); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [bundle.trip.id, row.person_id, snapshotId]);
+
+  async function copy(what: "rich" | "link", text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      setErr("Couldn't reach the clipboard — select the text and copy it manually.");
+    }
+  }
+
+  /**
+   * Put the email on the clipboard in both flavors, so pasting into a mail
+   * client keeps the formatting (text/html) while anything plainer still gets
+   * readable text.
+   *
+   * This is how rich mail actually leaves the app: a mailto: URL can only carry
+   * plain text (RFC 6068), and the app deliberately doesn't send mail itself.
+   * Nothing may be awaited before `clipboard.write` — Safari only honours a
+   * clipboard write inside the original user gesture.
+   */
+  async function copyRich() {
+    if (!notice) return;
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([notice.html], { type: "text/html" }),
+            "text/plain": new Blob([notice.body], { type: "text/plain" }),
+          }),
+        ]);
+      } else {
+        // Older Firefox has no ClipboardItem write: plain text beats nothing.
+        await navigator.clipboard.writeText(notice.body);
+      }
+      setCopied("rich");
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      setErr("Couldn't reach the clipboard — switch to Plain text and copy it manually.");
+    }
+  }
+
+  async function revoke() {
+    if (!notice) return;
+    if (!confirm("Revoke this statement link? Anyone who already has it will get a 'no longer valid' page, and preparing the email again will mint a new link.")) return;
+    setBusy(true);
+    try {
+      await api.revokeNotice(notice.token);
+      onPrepared();
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  }
+
+  // Prefer the snapshot's address (who they were when it was cut), but fall
+  // back to the live roster in case an address was added since.
+  const liveEmail = bundle.people.find((p) => p.id === row.person_id)?.email ?? null;
+  const email = notice?.person.email ?? liveEmail;
+  const mailto = notice && email
+    ? `mailto:${email}?subject=${encodeURIComponent(notice.subject)}&body=${encodeURIComponent(notice.body)}`
+    : null;
+  // Handing a very long mailto: to the OS is unreliable (Windows truncates
+  // around 2KB), so point at the clipboard before it silently clips the email.
+  const tooLongForMailto = !!mailto && mailto.length > 1900;
+  const owes = !!notice && notice.net < -0.005;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal notice-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="toolbar">
+          <h2 style={{ margin: 0 }}>Email {row.name}</h2>
+          <div className="spacer" />
+          {snapshots.length > 1 && (
+            <label className="fld" style={{ width: 220 }}>Based on
+              <select
+                value={snapshotId ?? ""}
+                disabled={busy}
+                onChange={(e) => setSnapshotId(Number(e.target.value))}
+              >
+                {snapshots.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {fmtTime(s.created_at)}{s.label ? ` · ${s.label}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+
+        {err && <div className="err">{err}</div>}
+
+        {!email && (
+          <div className="err">
+            No email address on file for {row.name}. Copy the text below and send it yourself, or
+            have their roster address added.
+          </div>
+        )}
+        {stale && snapshotId === snapshots[0]?.id && (
+          <p className="hint warn-note">
+            The trip has changed since this snapshot was taken. The email quotes the snapshot's
+            figures — take a new snapshot first if you want to send current numbers.
+          </p>
+        )}
+        {owes && notice && !notice.paymentInstructions && (
+          <p className="hint warn-note">
+            No payment instructions set for this trip, so the email just asks them to reply for
+            details. Add them under ⚙ Settings to include them here.
+          </p>
+        )}
+
+        {busy && !notice ? (
+          <p className="hint">Preparing…</p>
+        ) : notice ? (
+          <>
+            <label className="fld" style={{ display: "block", marginBottom: 4 }}>To
+              <input readOnly value={email ?? "—"} />
+            </label>
+            <label className="fld" style={{ display: "block", marginBottom: 4 }}>Subject
+              <input readOnly value={notice.subject} />
+            </label>
+            <div className="preview-tabs">
+              <button
+                className={`preview-tab ${view === "rich" ? "on" : ""}`}
+                onClick={() => setView("rich")}
+              >
+                Formatted
+              </button>
+              <button
+                className={`preview-tab ${view === "plain" ? "on" : ""}`}
+                onClick={() => setView("plain")}
+              >
+                Plain text
+              </button>
+            </div>
+            {view === "rich" ? (
+              // Sandboxed iframe: renders the email exactly as a mail client
+              // will, without its inline styles bleeding into the app (or the
+              // app's leaking in and flattering the preview).
+              <iframe className="notice-preview" title="Email preview" sandbox="" srcDoc={notice.html} />
+            ) : (
+              <pre className="notice-body">{notice.body}</pre>
+            )}
+
+            <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+              <button className="btn" onClick={copyRich}>
+                {copied === "rich" ? "Copied ✓" : "Copy formatted email"}
+              </button>
+              <a
+                className="btn ghost"
+                href={mailto ?? "#"}
+                onClick={(e) => { if (!mailto) e.preventDefault(); }}
+                aria-disabled={!mailto}
+                title="Opens a draft in your mail app. Mail links can only carry plain text, so this sends the unformatted version."
+              >
+                Open plain-text draft
+              </a>
+              <button className="btn ghost" onClick={() => copy("link", notice.url)}>
+                {copied === "link" ? "Copied ✓" : "Copy link only"}
+              </button>
+              <div className="spacer" />
+              <button className="btn ghost danger" disabled={busy} onClick={revoke}>Revoke link</button>
+              <button className="btn ghost" onClick={onClose}>Close</button>
+            </div>
+
+            <p className="hint" style={{ marginTop: 10 }}>
+              <strong>Copy formatted email</strong> puts the formatted version on your clipboard —
+              paste it into a new message to {email ?? "them"} with the subject above and it keeps
+              its formatting. The plain-text draft is there for mail apps that don't take a paste.
+            </p>
+            {tooLongForMailto && (
+              <p className="hint warn-note">
+                The plain-text draft is long enough that some mail apps truncate it. Prefer the
+                formatted copy, or paste the plain text into a new message.
+              </p>
+            )}
+            <p><small className="hint">
+              The link in the email needs no sign-in — anyone holding it can read {row.name}'s
+              statement, so send it only to them. Revoking it invalidates the URL immediately.
+            </small></p>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Corrections
+// Claims reported from shared statements ("you're missing my gas receipt").
+// Deliberately a review queue and nothing more: resolving one records that a
+// human dealt with it — the actual fix is an ordinary edit on another tab.
+function Corrections({
+  corrections, reload,
+}: {
+  corrections: Correction[];
+  reload: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [showResolved, setShowResolved] = useState(false);
+
+  if (corrections.length === 0) return null;
+  const openCount = corrections.filter((c) => c.status === "open").length;
+  const shown = showResolved ? corrections : corrections.filter((c) => c.status === "open");
+
+  async function setStatus(id: number, status: "open" | "resolved") {
+    setBusy(true); setErr(null);
+    try {
+      await api.setCorrectionStatus(id, status);
+      await reload();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>
+          Reported corrections{openCount > 0 && <span className="pill" style={{ marginLeft: 8 }}>{openCount} open</span>}
+        </h2>
+        <div className="spacer" />
+        <label className="row" style={{ alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} />
+          <span className="hint">Show resolved ({corrections.length - openCount})</span>
+        </label>
+      </div>
+
+      {err && <div className="err">{err}</div>}
+
+      {shown.length === 0 ? (
+        <p className="hint">Nothing open — every reported correction has been dealt with.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr><th>From</th><th>What</th><th className="num">Amount</th><th>Details</th><th>Reported</th><th></th></tr>
+          </thead>
+          <tbody>
+            {shown.map((c) => (
+              <tr key={c.id} className={c.status === "resolved" ? "zero" : ""}>
+                <td>
+                  {c.personName}
+                  {c.reporter_name && c.reporter_name !== c.personName && (
+                    <div className="hint">sent by {c.reporter_name}</div>
+                  )}
+                </td>
+                <td>{CORRECTION_LABELS[c.kind]}</td>
+                <td className="num">{c.amount != null ? money(c.amount) : ""}</td>
+                <td className="correction-msg">{c.message}</td>
+                <td className="hint">{fmtTime(c.created_at)}</td>
+                <td className="num">
+                  {c.status === "open" ? (
+                    <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "resolved")}>
+                      Resolve
+                    </button>
+                  ) : (
+                    <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "open")}>
+                      Reopen
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p><small className="hint">
+        Reported from the statement links emailed out of this tab. Resolving one just marks it
+        handled — fix the underlying receipt on the Expenses tab, then take a fresh snapshot
+        before emailing updated figures.
+      </small></p>
+    </div>
   );
 }
 
@@ -1125,7 +1817,9 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
   }
 
   async function remove(sid: number) {
-    if (!confirm("Delete this snapshot? This cannot be undone.")) return;
+    // Statement links are cut from a snapshot, so deleting it breaks any link
+    // already emailed from it — say so rather than let a member hit a dead URL.
+    if (!confirm("Delete this snapshot? Any statement links emailed from it will stop working. This cannot be undone.")) return;
     setSnapBusy(true);
     setErr(null);
     try {
@@ -2108,6 +2802,7 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
   const [slack, setSlack] = useState(trip.slack_url ?? "");
   const [rate, setRate] = useState(String(trip.mileage_rate));
   const [units, setUnits] = useState(trip.roster_units.join(", "));
+  const [pay, setPay] = useState(trip.payment_instructions ?? "");
 
   useEffect(() => {
     setSlug(trip.slug);
@@ -2116,7 +2811,8 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
     setSlack(trip.slack_url ?? "");
     setRate(String(trip.mileage_rate));
     setUnits(trip.roster_units.join(", "));
-  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate, trip.roster_units.join(",")]);
+    setPay(trip.payment_instructions ?? "");
+  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate, trip.roster_units.join(","), trip.payment_instructions]);
 
   function save(patch: Record<string, unknown>) {
     run(() => api.updateTrip(trip.id, patch));
@@ -2189,6 +2885,22 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
             }}
           />
           <small className="hint">Comma-separated; which units populate the picker.</small>
+        </label>
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <label className="fld" style={{ flex: 1 }}>How to pay the troop
+          <textarea
+            rows={3}
+            value={pay}
+            disabled={busy}
+            placeholder="e.g. Zelle to treasurer@… , or mail a check payable to Troop 10 RWC. Include the trip name."
+            onChange={(e) => setPay(e.target.value)}
+            onBlur={() => pay !== (trip.payment_instructions ?? "") && save({ payment_instructions: pay || null })}
+          />
+          <small className="hint">
+            Reproduced verbatim in reimbursement emails and on shared statements for anyone who owes
+            money. Carried over to new trips.
+          </small>
         </label>
       </div>
     </div>

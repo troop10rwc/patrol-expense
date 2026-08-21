@@ -1,6 +1,16 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
-import type { CostGroup, Trip, TripBundle, SnapshotMeta, ImportPreview, OutstandingExpense } from "../shared/types.ts";
+import type {
+  CostGroup,
+  Trip,
+  TripBundle,
+  SnapshotMeta,
+  ImportPreview,
+  OutstandingExpense,
+  NoticeLink,
+  Correction,
+  CorrectionStatus,
+} from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
@@ -11,6 +21,7 @@ import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
 import { buildStatement } from "./statement.ts";
+import { buildNotice, buildPublicStatement, newLinkToken } from "./notice.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -55,6 +66,16 @@ api.get("/me/statement", async (c) => {
 });
 
 const bad = (msg: string) => ({ error: msg });
+
+/**
+ * Absolute URL of a shared statement, for pasting into an email.
+ *
+ * `reqUrl` is the inner request the entrypoint's `fetch` rewrote (BASE_PATH
+ * already stripped), so only its origin is usable — the mount prefix has to be
+ * put back by hand.
+ */
+const statementUrl = (reqUrl: string, token: string) =>
+  `${new URL(reqUrl).origin}${BASE_PATH}/s/${token}`;
 
 // Roster units a freshly-imported trip resolves people against (matches the
 // seed). The new trip stores these so its roster picker keeps working.
@@ -124,10 +145,19 @@ api.post("/trips", async (c) => {
   if (!b.name) return c.json(bad("name is required"), 400);
   const uuid = b.uuid ?? crypto.randomUUID();
   const slug = (b.slug && b.slug.trim()) || slugify(b.name);
+  // How members pay the troop rarely changes between events, so carry it over
+  // from the most recent trip that has it — otherwise every new trip's first
+  // reimbursement email would go out with no payment instructions.
+  const inherited = await c.env.DB.prepare(
+    "SELECT payment_instructions FROM trips WHERE payment_instructions IS NOT NULL ORDER BY id DESC LIMIT 1",
+  ).first<{ payment_instructions: string }>();
   const res = await c.env.DB.prepare(
-    "INSERT INTO trips (uuid, slug, name, trip_date, planning_doc_url, slack_url, mileage_rate) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO trips (uuid, slug, name, trip_date, planning_doc_url, slack_url, mileage_rate, payment_instructions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(uuid, slug, b.name, b.trip_date ?? null, b.planning_doc_url ?? null, b.slack_url ?? null, b.mileage_rate ?? 0.28)
+    .bind(
+      uuid, slug, b.name, b.trip_date ?? null, b.planning_doc_url ?? null, b.slack_url ?? null,
+      b.mileage_rate ?? 0.28, b.payment_instructions ?? inherited?.payment_instructions ?? null,
+    )
     .run();
   await scaffoldDefaultGroups(c.env.DB, res.meta.last_row_id);
   return c.json(await bundleResponse(c.env.DB, res.meta.last_row_id), 201);
@@ -163,14 +193,16 @@ api.patch("/trips/:id", async (c) => {
     ...(b.slack_url !== undefined ? { slack_url: b.slack_url } : {}),
     ...(b.mileage_rate !== undefined ? { mileage_rate: b.mileage_rate } : {}),
     ...(Array.isArray(b.roster_units) ? { roster_units: b.roster_units } : {}),
+    ...(b.payment_instructions !== undefined ? { payment_instructions: b.payment_instructions } : {}),
   };
   if (!merged.slug?.trim()) return c.json(bad("slug cannot be empty"), 400);
   await c.env.DB.prepare(
-    "UPDATE trips SET name=?, slug=?, trip_date=?, planning_doc_url=?, slack_url=?, mileage_rate=?, roster_units=? WHERE id=?",
+    "UPDATE trips SET name=?, slug=?, trip_date=?, planning_doc_url=?, slack_url=?, mileage_rate=?, roster_units=?, payment_instructions=? WHERE id=?",
   )
     .bind(
       merged.name, merged.slug, merged.trip_date, merged.planning_doc_url,
-      merged.slack_url, merged.mileage_rate, JSON.stringify(merged.roster_units), id,
+      merged.slack_url, merged.mileage_rate, JSON.stringify(merged.roster_units),
+      merged.payment_instructions?.trim() || null, id,
     )
     .run();
   if (merged.mileage_rate !== current.mileage_rate) {
@@ -618,6 +650,122 @@ api.delete("/snapshots/:sid", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- reimbursement notices ----
+// A notice is one person's "here's what you owe and why", cut from a snapshot.
+// Preparing one mints (or reuses) a no-sign-in statement link and returns the
+// rendered email; the treasurer sends it from their own mail client, so replies
+// land with a human. Nothing is sent from here.
+api.post("/trips/:id/notices", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const b = await c.req
+    .json<{ person_id?: number; snapshot_id?: number }>()
+    .catch(() => ({ person_id: undefined, snapshot_id: undefined }));
+  const personId = Number(b.person_id);
+  if (!Number.isFinite(personId)) return c.json(bad("person_id is required"), 400);
+
+  // Default to the newest snapshot: the figures a leader just looked at.
+  const snap = b.snapshot_id
+    ? await c.env.DB.prepare("SELECT * FROM snapshots WHERE id = ? AND trip_id = ?")
+        .bind(Number(b.snapshot_id), tripId)
+        .first<SnapshotRow>()
+    : await c.env.DB.prepare("SELECT * FROM snapshots WHERE trip_id = ? ORDER BY id DESC LIMIT 1")
+        .bind(tripId)
+        .first<SnapshotRow>();
+  if (!snap) {
+    // Distinguish "this trip has never been snapshotted" (the leader needs to
+    // take one) from "that snapshot isn't this trip's" (a bad request).
+    return b.snapshot_id
+      ? c.json(bad("that snapshot doesn't belong to this trip"), 404)
+      : c.json(bad("no snapshot yet — take one first so the emailed figures are frozen"), 409);
+  }
+
+  const bundle = JSON.parse(snap.bundle) as TripBundle;
+  // Validate against the frozen bundle before writing, so a bad person_id can't
+  // leave an orphan link behind.
+  if (!bundle.paysheet.rows.some((r) => r.person_id === personId)) {
+    return c.json(bad("that person isn't on this snapshot"), 404);
+  }
+
+  // One live link per (snapshot, person): re-preparing the same notice must
+  // hand back the URL already in someone's inbox, not mint a second secret.
+  const existing = await c.env.DB.prepare(
+    "SELECT token FROM statement_links WHERE snapshot_id = ? AND person_id = ? AND revoked_at IS NULL",
+  )
+    .bind(snap.id, personId)
+    .first<{ token: string }>();
+  let token = existing?.token;
+  if (!token) {
+    token = newLinkToken();
+    await c.env.DB.prepare(
+      "INSERT INTO statement_links (token, trip_id, snapshot_id, person_id, created_by) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind(token, tripId, snap.id, personId, c.get("user").email)
+      .run();
+  }
+
+  const notice = buildNotice(
+    bundle,
+    { id: snap.id, label: snap.label, created_at: snap.created_at },
+    personId,
+    token,
+    statementUrl(c.req.url, token),
+  );
+  if (!notice) return c.json(bad("that person isn't on this snapshot"), 404);
+  return c.json(notice);
+});
+
+// Links already handed out for this trip — the tab uses these to show who has
+// been written to, and from which snapshot.
+api.get("/trips/:id/notices", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    // Newest first. The key is the token itself, so insertion order is rowid —
+    // there's no `id` column on this table.
+    "SELECT token, person_id, snapshot_id, created_by, created_at FROM statement_links WHERE trip_id = ? AND revoked_at IS NULL ORDER BY rowid DESC",
+  )
+    .bind(Number(c.req.param("id")))
+    .all<NoticeLink>();
+  return c.json(results);
+});
+
+// Revoke a link (it was sent to the wrong address, or the figures were wrong).
+// Kept as a row so the audit trail survives; the page 404s from here on.
+api.delete("/notices/:token", async (c) => {
+  await c.env.DB.prepare("UPDATE statement_links SET revoked_at = datetime('now') WHERE token = ?")
+    .bind(c.req.param("token"))
+    .run();
+  return c.json({ ok: true });
+});
+
+// ---- corrections (reported from a shared statement; reviewed here) ----
+api.get("/trips/:id/corrections", async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT co.*, COALESCE(p.name, co.reporter_name, '#' || co.person_id) AS personName
+       FROM corrections co LEFT JOIN people p ON p.id = co.person_id
+      WHERE co.trip_id = ?
+      ORDER BY (co.status = 'open') DESC, co.id DESC`,
+  )
+    .bind(Number(c.req.param("id")))
+    .all<Correction>();
+  return c.json(results);
+});
+
+api.patch("/corrections/:cid", async (c) => {
+  const cid = Number(c.req.param("cid"));
+  const b = await c.req.json<{ status?: CorrectionStatus }>().catch(() => ({ status: undefined }));
+  if (b.status !== "open" && b.status !== "resolved") return c.json(bad("status must be open or resolved"), 400);
+  const row = await c.env.DB.prepare("SELECT trip_id FROM corrections WHERE id = ?").bind(cid).first<{ trip_id: number }>();
+  if (!row) return c.json(bad("correction not found"), 404);
+  await c.env.DB.prepare(
+    `UPDATE corrections
+        SET status = ?, resolved_at = CASE WHEN ? = 'resolved' THEN datetime('now') END,
+            resolved_by = CASE WHEN ? = 'resolved' THEN ? END
+      WHERE id = ?`,
+  )
+    .bind(b.status, b.status, b.status, c.get("user").email, cid)
+    .run();
+  return c.json({ ok: true });
+});
+
 // What changed since the most recent snapshot (null when none exists yet).
 api.get("/trips/:id/changes", async (c) => {
   const tripId = Number(c.req.param("id"));
@@ -810,6 +958,106 @@ api.post("/seed", async (c) => {
 });
 
 api.notFound((c) => c.json(bad("not found"), 404));
+
+// ---- public statement (bearer token, no sign-in) ----
+// The one unauthenticated surface in the app. Recipients of a reimbursement
+// email include parents with no identity account, so the statement explaining
+// their amount can't sit behind a login — the emailed token IS the credential.
+//
+// These MUST be registered before `app.route("/api", api)` below: that call
+// installs `requireAuth` across /api/*, and Hono runs matching handlers in
+// registration order, so whichever is registered first answers. (Getting this
+// backwards fails safe — the routes would 401 rather than leak.)
+//
+// A token authorizes exactly one person's figures for one snapshot. Everything
+// rendered is re-derived from that snapshot's frozen bundle, so the page can
+// never disagree with the email that carried the link.
+type LinkRow = { token: string; trip_id: number; snapshot_id: number; person_id: number };
+
+/** Load a live link and rebuild the notice it points at. */
+async function resolveLink(db: D1Database, token: string, reqUrl: string) {
+  const link = await db
+    .prepare("SELECT token, trip_id, snapshot_id, person_id FROM statement_links WHERE token = ? AND revoked_at IS NULL")
+    .bind(token)
+    .first<LinkRow>();
+  if (!link) return null;
+  const snap = await db.prepare("SELECT * FROM snapshots WHERE id = ?").bind(link.snapshot_id).first<SnapshotRow>();
+  if (!snap) return null;
+  const bundle = JSON.parse(snap.bundle) as TripBundle;
+  const notice = buildNotice(
+    bundle,
+    { id: snap.id, label: snap.label, created_at: snap.created_at },
+    link.person_id,
+    link.token,
+    statementUrl(reqUrl, link.token),
+  );
+  if (!notice) return null;
+  return { link, bundle, notice };
+}
+
+/** Corrections this person has already reported for this trip. */
+async function reportedCorrections(db: D1Database, tripId: number, personId: number) {
+  const { results } = await db
+    .prepare("SELECT kind, message, created_at, status FROM corrections WHERE trip_id = ? AND person_id = ? ORDER BY id DESC")
+    .bind(tripId, personId)
+    .all<Pick<Correction, "kind" | "message" | "created_at" | "status">>();
+  return results;
+}
+
+app.get("/api/public/statement/:token", async (c) => {
+  const resolved = await resolveLink(c.env.DB, c.req.param("token"), c.req.url);
+  if (!resolved) return c.json(bad("this statement link is no longer valid"), 404);
+  const { link, bundle, notice } = resolved;
+  // Identity comes from the frozen bundle, not the live people table: the row
+  // may be gone, and the link's promise is about who they were at capture time.
+  const email = bundle.people.find((p) => p.id === link.person_id)?.email ?? null;
+  return c.json(
+    await buildPublicStatement(c.env.DB, c.env.ROSTER, notice, email, await reportedCorrections(c.env.DB, link.trip_id, link.person_id)),
+  );
+});
+
+// Report a correction from a shared statement. Deliberately inert: it queues a
+// claim for a leader to review and never touches an expense, so an unauth'd
+// caller holding a link can't move any number in the app.
+const CORRECTION_KINDS = new Set(["missing_expense", "wrong_amount", "not_mine", "other"]);
+const MAX_CORRECTIONS_PER_PERSON = 25; // flood stop for an unauthenticated route
+
+app.post("/api/public/statement/:token/corrections", async (c) => {
+  const resolved = await resolveLink(c.env.DB, c.req.param("token"), c.req.url);
+  if (!resolved) return c.json(bad("this statement link is no longer valid"), 404);
+  const { link, bundle, notice } = resolved;
+
+  type CorrectionBody = { kind?: string; message?: string; amount?: number | string | null; reporter_name?: string };
+  const b = await c.req.json<CorrectionBody>().catch((): CorrectionBody => ({}));
+  const kind = String(b.kind ?? "");
+  if (!CORRECTION_KINDS.has(kind)) return c.json(bad("pick what kind of correction this is"), 400);
+  const message = (b.message ?? "").trim();
+  if (!message) return c.json(bad("tell us what's wrong so we can fix it"), 400);
+  if (message.length > 2000) return c.json(bad("that's longer than we can store — please shorten it"), 400);
+  const amount = b.amount == null || b.amount === "" ? null : Number(b.amount);
+  if (amount != null && (!Number.isFinite(amount) || amount < 0)) return c.json(bad("amount must be a positive number"), 400);
+
+  const { count } = (await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM corrections WHERE trip_id = ? AND person_id = ?",
+  )
+    .bind(link.trip_id, link.person_id)
+    .first<{ count: number }>()) ?? { count: 0 };
+  if (count >= MAX_CORRECTIONS_PER_PERSON) {
+    return c.json(bad("you've reported plenty already — please reply to the email instead"), 429);
+  }
+
+  await c.env.DB.prepare(
+    "INSERT INTO corrections (trip_id, person_id, snapshot_id, kind, message, amount, reporter_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(link.trip_id, link.person_id, link.snapshot_id, kind, message, amount, (b.reporter_name ?? "").trim() || notice.person.name)
+    .run();
+
+  const email = bundle.people.find((p) => p.id === link.person_id)?.email ?? null;
+  return c.json(
+    await buildPublicStatement(c.env.DB, c.env.ROSTER, notice, email, await reportedCorrections(c.env.DB, link.trip_id, link.person_id)),
+    201,
+  );
+});
 
 app.route("/api", api);
 

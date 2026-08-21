@@ -13,6 +13,9 @@ export interface Trip {
   slack_url: string | null;
   mileage_rate: number;
   roster_units: string[];
+  /** How a member settles up (Zelle / check / etc). Free text, reproduced in
+   *  reimbursement notices and on shared statements. */
+  payment_instructions: string | null;
   created_at: string;
 }
 
@@ -307,6 +310,106 @@ export interface OutstandingExpense {
   tripName: string;
   outstanding: number; // dollars still owed to the member (positive)
   status: SettlementStatus;
+}
+
+// ----- reimbursement notices (the per-person email + its shared statement) -----
+// A notice explains one person's net for one event, cut from a snapshot so the
+// amount in the email and the amount on the linked page can never disagree.
+// Everything here is derived from the snapshot's frozen bundle — nothing is
+// recomputed from live data.
+
+/** One cost group's contribution to a person's share of the trip. */
+export interface NoticeShareLine {
+  group_id: number;
+  groupName: string;
+  kind: GroupKind;
+  groupTotal: number; // everything charged to this group
+  totalShares: number; // attendees whose share is attributable to an adult
+  perShare: number; // groupTotal / totalShares
+  shareCount: number; // shares this person carries
+  subtotal: number; // shareCount * perShare
+  covers: string[]; // who those shares are (themselves + their youth)
+  expenses: { description: string; amount: number; payer: string }[]; // what made up groupTotal
+}
+
+/** A receipt this person fronted (money out of their pocket). */
+export interface NoticePaidLine {
+  description: string;
+  amount: number;
+  groupName: string;
+}
+
+/**
+ * One person's frozen expense notice for one event. `net` follows the paysheet
+ * convention: positive => the troop owes them, negative => they owe the troop.
+ */
+export interface PersonNotice {
+  trip: { uuid: string; slug: string; name: string; trip_date: string | null };
+  snapshot: { id: number; label: string | null; created_at: string };
+  person: { id: number; name: string; email: string | null };
+  shareLines: NoticeShareLine[]; // groups they were billed for
+  paidLines: NoticePaidLine[]; // receipts they fronted
+  prepayLines: { note: string | null; amount: number }[];
+  tripTotal: number; // every dollar spent on the trip (context for their share)
+  paid: number;
+  owed: number;
+  prepay: number;
+  net: number; // paid - owed - prepay
+  status: SettlementStatus;
+  paymentInstructions: string | null;
+  token: string; // the statement link's bearer token (to revoke it)
+  url: string; // absolute, no-sign-in statement link (carries the token)
+  subject: string; // rendered email subject
+  /** The email as the recipient sees it: high-level figures plus links to the
+   *  statement. Inline-styled, mail-client-safe HTML — pasted into the sender's
+   *  mail client via a rich clipboard copy (mailto: can't carry HTML). */
+  html: string;
+  /** Plain-text twin of `html` — carried by the mailto: draft and offered as the
+   *  text/plain clipboard flavor, so the message survives HTML-less clients. */
+  body: string;
+}
+
+/** An existing notice link, so the tab can show who has already been written to. */
+export interface NoticeLink {
+  token: string;
+  person_id: number;
+  snapshot_id: number;
+  created_by: string | null;
+  created_at: string;
+}
+
+export type CorrectionKind = "missing_expense" | "wrong_amount" | "not_mine" | "other";
+export type CorrectionStatus = "open" | "resolved";
+
+/** A correction reported from a shared statement page. Inert until a leader
+ *  acts on it — it never changes any expense by itself. */
+export interface Correction {
+  id: number;
+  trip_id: number;
+  person_id: number;
+  personName: string;
+  snapshot_id: number | null;
+  kind: CorrectionKind;
+  message: string;
+  amount: number | null;
+  reporter_name: string | null;
+  status: CorrectionStatus;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+}
+
+/** What the no-sign-in statement page renders for a link holder: the frozen
+ *  notice for this event, plus their live balance on other events so the page
+ *  can show the complete total owed. */
+export interface PublicStatement {
+  notice: PersonNotice;
+  /** Other events where this member has a live balance (this trip excluded). */
+  otherEvents: { name: string; trip_date: string | null; outstanding: number }[];
+  /** This event's frozen net plus every other event's live net. */
+  grandTotal: number;
+  /** Corrections already reported from this link (so a reporter sees it landed). */
+  reported: { kind: CorrectionKind; message: string; created_at: string; status: CorrectionStatus }[];
 }
 
 /** Lightweight per-trip rollup for the index page. */

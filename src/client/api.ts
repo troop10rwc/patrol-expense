@@ -1,4 +1,8 @@
-import type { Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot, ImportPreview, PersonStatement } from "../shared/types.ts";
+import type {
+  Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot,
+  ImportPreview, PersonStatement, PersonNotice, NoticeLink, Correction, CorrectionKind,
+  CorrectionStatus, PublicStatement,
+} from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 export { HOME_ADDRESS } from "../shared/constants.ts";
@@ -146,6 +150,23 @@ export const api = {
   getChanges: (tripId: number) =>
     req<{ since: SnapshotMeta | null; diff: BundleDiff | null }>(`/api/trips/${tripId}/changes`),
 
+  // ---- reimbursement notices ----
+  // Preparing a notice mints (or reuses) that person's no-sign-in statement
+  // link and returns the rendered email. Nothing is sent from the app: the
+  // treasurer sends the draft from their own mail client so replies reach them.
+  prepareNotice: (tripId: number, person_id: number, snapshot_id?: number) =>
+    req<PersonNotice>(`/api/trips/${tripId}/notices`, {
+      method: "POST",
+      body: JSON.stringify({ person_id, snapshot_id }),
+    }),
+  listNotices: (tripId: number) => req<NoticeLink[]>(`/api/trips/${tripId}/notices`),
+  revokeNotice: (token: string) => req<{ ok: true }>(`/api/notices/${token}`, { method: "DELETE" }),
+
+  // ---- corrections reported from shared statements ----
+  listCorrections: (tripId: number) => req<Correction[]>(`/api/trips/${tripId}/corrections`),
+  setCorrectionStatus: (cid: number, status: CorrectionStatus) =>
+    req<{ ok: true }>(`/api/corrections/${cid}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+
   // ---- Google Sheet import (preview -> commit) ----
   importPreview: (sheetUrl: string) =>
     req<ImportPreview>("/api/import/preview", { method: "POST", body: JSON.stringify({ sheetUrl }) }),
@@ -163,6 +184,23 @@ export const api = {
     ),
 };
 
+
+/**
+ * The shared-statement endpoints. Kept separate from `api` because they're the
+ * app's only unauthenticated calls: the emailed token in the path is the whole
+ * credential, and the caller may well be someone with no troop account at all.
+ */
+export const publicApi = {
+  statement: (token: string) => req<PublicStatement>(`/api/public/statement/${token}`),
+  reportCorrection: (
+    token: string,
+    body: { kind: CorrectionKind; message: string; amount?: number | null; reporter_name?: string },
+  ) =>
+    req<PublicStatement>(`/api/public/statement/${token}/corrections`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+};
 
 export function money(n: number): string {
   const sign = n < 0 ? "-" : "";
