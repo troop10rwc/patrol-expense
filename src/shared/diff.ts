@@ -43,6 +43,7 @@ export interface BundleDiff {
     rows: PaysheetRowChange[];
     totalExpenses: FieldChange | null;
     totalPrepaid: FieldChange | null;
+    totalReimbursed: FieldChange | null;
   };
 }
 
@@ -62,7 +63,7 @@ function expenseKey(e: Expense): string {
     : `id:${e.id}`;
 }
 
-const EXPENSE_FIELDS: (keyof Expense)[] = ["description", "amount", "group_id", "payer_id"];
+const EXPENSE_FIELDS: (keyof Expense)[] = ["description", "amount", "group_id", "payer_id", "reimbursed_at"];
 
 function diffExpenses(prev: Expense[], curr: Expense[]): BundleDiff["expenses"] {
   const prevByKey = new Map(prev.map((e) => [expenseKey(e), e]));
@@ -80,8 +81,10 @@ function diffExpenses(prev: Expense[], curr: Expense[]): BundleDiff["expenses"] 
     }
     const changes: FieldChange[] = [];
     for (const f of EXPENSE_FIELDS) {
-      const before = p[f];
-      const after = c[f];
+      // A snapshot frozen before a field existed carries `undefined` where the
+      // live bundle carries `null` — same meaning, so normalize before comparing.
+      const before = p[f] ?? null;
+      const after = c[f] ?? null;
       const differs = f === "amount" ? numChanged(before as number, after as number) : before !== after;
       if (differs) changes.push({ field: f, from: before, to: after });
     }
@@ -102,7 +105,7 @@ function diffById<T extends { id: number }>(prev: T[], curr: T[]): { added: T[];
   };
 }
 
-const PAYSHEET_FIELDS = ["paid", "owed", "prepay", "balance", "outstanding"] as const;
+const PAYSHEET_FIELDS = ["paid", "owed", "prepay", "reimbursed", "balance", "outstanding"] as const;
 
 function diffPaysheet(prev: TripBundle["paysheet"], curr: TripBundle["paysheet"]): BundleDiff["paysheet"] {
   const prevByPerson = new Map(prev.rows.map((r) => [r.person_id, r]));
@@ -117,7 +120,9 @@ function diffPaysheet(prev: TripBundle["paysheet"], curr: TripBundle["paysheet"]
     }
     const changes: FieldChange[] = [];
     for (const f of PAYSHEET_FIELDS) {
-      if (numChanged(p[f], c[f])) changes.push({ field: f, from: p[f], to: c[f] });
+      // Snapshots frozen before a field existed simply read as 0 (numChanged
+      // coalesces), so an old bundle never shows up as a spurious change.
+      if (numChanged(p[f], c[f])) changes.push({ field: f, from: p[f] ?? 0, to: c[f] });
     }
     if (p.status !== c.status) changes.push({ field: "status", from: p.status, to: c.status });
     if (changes.length) rows.push({ person_id: c.person_id, name: c.name, changes });
@@ -135,6 +140,9 @@ function diffPaysheet(prev: TripBundle["paysheet"], curr: TripBundle["paysheet"]
       : null,
     totalPrepaid: numChanged(prev.totalPrepaid, curr.totalPrepaid)
       ? { field: "totalPrepaid", from: prev.totalPrepaid, to: curr.totalPrepaid }
+      : null,
+    totalReimbursed: numChanged(prev.totalReimbursed, curr.totalReimbursed)
+      ? { field: "totalReimbursed", from: prev.totalReimbursed ?? 0, to: curr.totalReimbursed }
       : null,
   };
 }
@@ -155,7 +163,8 @@ export function diffBundles(prev: TripBundle, curr: TripBundle): BundleDiff {
     people.removed.length > 0 ||
     paysheet.rows.length > 0 ||
     paysheet.totalExpenses != null ||
-    paysheet.totalPrepaid != null;
+    paysheet.totalPrepaid != null ||
+    paysheet.totalReimbursed != null;
 
   return { hasChanges, expenses, prepayments, people, paysheet };
 }

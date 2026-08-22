@@ -110,6 +110,14 @@ export const api = {
     return req<TripBundle>(`/api/trips/${tripId}/expenses`, { method: "POST", body: JSON.stringify(body) });
   },
   deleteExpense: (eid: number) => req<TripBundle>(`/api/expenses/${eid}`, { method: "DELETE" }),
+  // Mark receipts as already paid back to their payer (or clear the mark). A
+  // reimbursed receipt stops counting toward that person's net on the
+  // Reimbursement tab.
+  setExpensesReimbursed: (tripId: number, ids: number[], reimbursed: boolean) =>
+    req<TripBundle>(`/api/trips/${tripId}/expenses/reimbursed`, {
+      method: "POST",
+      body: JSON.stringify({ ids, reimbursed }),
+    }),
   // Re-charge a batch of hand-entered receipts to another cost group.
   moveExpenses: (tripId: number, ids: number[], group_id: number) =>
     req<TripBundle>(`/api/trips/${tripId}/expenses/move`, {

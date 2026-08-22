@@ -301,6 +301,7 @@ function StatementEventCard({ ev }: { ev: StatementEvent }) {
       </div>
       <div className="hint stmt-breakdown">
         Paid {money(ev.paid)} · Share {money(ev.owed)}
+        {ev.reimbursed ? ` · Paid back ${money(ev.reimbursed)}` : ""}
         {ev.prepay ? ` · Pre-reimbursed ${money(ev.prepay)}` : ""}
       </div>
 
@@ -467,13 +468,19 @@ function PublicStatementPage({ token }: { token: string }) {
 
       {n.paidLines.length > 0 && (
         <div className="card">
-          <h2>Receipts you paid — {money(n.paid)}</h2>
+          <h2>
+            Receipts you paid — {money(n.paid)}
+            {n.reimbursed > 0 && <span className="hint"> · {money(n.reimbursed)} already paid back</span>}
+          </h2>
           <table>
             <tbody>
               {n.paidLines.map((l, i) => (
-                <tr key={i}>
+                <tr key={i} className={l.reimbursed ? "reimbursed" : undefined}>
                   <td>{l.description}</td>
-                  <td className="hint">{l.groupName}</td>
+                  <td className="hint">
+                    {l.groupName}
+                    {l.reimbursed && <span className="pill pill-new" style={{ marginLeft: 6 }}>paid back</span>}
+                  </td>
                   <td className="num">{money(l.amount)}</td>
                 </tr>
               ))}
@@ -501,6 +508,9 @@ function PublicStatementPage({ token }: { token: string }) {
           <tbody>
             <tr><td>Receipts you paid</td><td className="num">{money(n.paid)}</td></tr>
             <tr><td>Your share of costs</td><td className="num">−{money(n.owed)}</td></tr>
+            {n.reimbursed > 0 && (
+              <tr><td>Receipts already paid back to you</td><td className="num">−{money(n.reimbursed)}</td></tr>
+            )}
             {n.prepay > 0 && <tr><td>Already reimbursed to you</td><td className="num">−{money(n.prepay)}</td></tr>}
             <tr className="shared-total">
               <td><strong>{owes ? "You owe" : owed ? "Owed to you" : "Settled"}</strong></td>
@@ -1201,7 +1211,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
   }, [changes]);
 
   const rows = bundle.paysheet.rows
-    .filter((r) => showAll || r.paid || r.owed || r.prepay)
+    .filter((r) => showAll || r.paid || r.owed || r.prepay || r.reimbursed)
     .sort((a, b) => a.outstanding - b.outstanding);
 
   const owedToPeople = rows.filter((r) => r.outstanding > 0.005).reduce((s, r) => s + r.outstanding, 0);
@@ -1226,6 +1236,10 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
       <div className="kpi" style={{ marginBottom: 18 }}>
         <div><div className="k">Total expenses</div><div className="v">{money(bundle.paysheet.totalExpenses)}</div></div>
         <div><div className="k">Pre-reimbursed</div><div className="v">{money(bundle.paysheet.totalPrepaid)}</div></div>
+        <div>
+          <div className="k">Receipts paid back</div>
+          <div className="v">{money(bundle.paysheet.totalReimbursed ?? 0)}</div>
+        </div>
         <div><div className="k">Owed to people</div><div className="v pos">{money(owedToPeople)}</div></div>
         <div><div className="k">Owed by people</div><div className="v neg">{money(owedByPeople)}</div></div>
       </div>
@@ -1246,6 +1260,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             <th className="num">Paid</th>
             <th className="num">Owes (share)</th>
             <th className="num">Pre-reimbursed</th>
+            <th className="num">Reimbursed</th>
             <th className="num">Net</th>
             <th>Settlement</th>
             <th>Notice</th>
@@ -1267,11 +1282,14 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
               return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
             };
             return (
-              <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
+              <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay && !r.reimbursed ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
                 <td>{r.name} {r.code && <span className="hint">({r.code})</span>}{rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}</td>
                 <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
                 <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
                 <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
+                {/* Receipts of theirs already handed back, marked one by one on
+                    the Expenses tab. Already netted out of the figure beside it. */}
+                <td className={cls("reimbursed")}>{r.reimbursed ? money(r.reimbursed) : ""}{note("reimbursed")}</td>
                 <td className={cls("outstanding")}>{label}</td>
                 <td className={rc?.fields.has("status") ? "changed" : ""}>
                   <select
@@ -1321,12 +1339,13 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={7} className="empty">No activity yet.</td></tr>
+            <tr><td colSpan={8} className="empty">No activity yet.</td></tr>
           )}
         </tbody>
       </table>
       <p><small className="hint">
-        Net = what they paid − their share of expenses − pre-reimbursements.
+        Net = what they paid − their share of expenses − pre-reimbursements − receipts
+        already paid back (marked on the Expenses tab).
         Green means the troop owes them; red means they owe the troop.
         {since && changes?.diff?.hasChanges && <> <span className="changed-key">Highlighted</span> cells show <em>before → after</em> for changes since the snapshot taken {fmtTime(since.created_at)}.</>}
       </small></p>
@@ -1655,15 +1674,24 @@ function Corrections({
 
 // ------------------------------------------------------------------ Snapshots
 const MONEY_FIELDS = new Set([
-  "amount", "paid", "owed", "prepay", "balance", "outstanding", "totalExpenses", "totalPrepaid",
+  "amount", "paid", "owed", "prepay", "reimbursed", "balance", "outstanding",
+  "totalExpenses", "totalPrepaid", "totalReimbursed",
 ]);
 function fmtVal(field: string, v: unknown): string {
   if (typeof v === "number" && MONEY_FIELDS.has(field)) return money(v);
+  // The reimbursed mark is a timestamp, but what changed is whether it's set.
+  if (field === "reimbursed_at") return v == null || v === "" ? "not reimbursed" : "reimbursed";
   if (v == null || v === "") return "—";
   return String(v);
 }
+// Field names a reader shouldn't have to decode. Anything absent reads fine
+// as-is ("paid", "owed", "prepay"…).
+const FIELD_LABELS: Record<string, string> = {
+  reimbursed_at: "reimbursement",
+  reimbursed: "paid back",
+};
 function fmtChange(ch: FieldChange): string {
-  return `${ch.field}: ${fmtVal(ch.field, ch.from)} → ${fmtVal(ch.field, ch.to)}`;
+  return `${FIELD_LABELS[ch.field] ?? ch.field}: ${fmtVal(ch.field, ch.from)} → ${fmtVal(ch.field, ch.to)}`;
 }
 function fmtTime(s: string): string {
   // SQLite datetime('now') is "YYYY-MM-DD HH:MM:SS" in UTC.
@@ -1689,14 +1717,17 @@ function accounting(n: number): string {
 // is supplied, a "Net change vs prev" column gives each person's net movement.
 function buildSummaryCsv(b: TripBundle, prev?: TripBundle | null): string {
   const prevNet = prev ? netFromBundle(prev) : null;
-  const header = ["Adult", "Code", "Paid", "Owes (share)", "Pre-reimbursed", "Net"];
+  const header = ["Adult", "Code", "Paid", "Owes (share)", "Pre-reimbursed", "Reimbursed", "Net"];
   if (prevNet) header.push("Net change vs prev");
   header.push("Settlement");
 
   const rows: unknown[][] = [header];
   for (const r of b.paysheet.rows) {
-    if (!(r.paid || r.owed || r.prepay)) continue;
-    const cells: unknown[] = [r.name, r.code ?? "", round2(r.paid), round2(r.owed), round2(r.prepay), round2(r.outstanding)];
+    if (!(r.paid || r.owed || r.prepay || r.reimbursed)) continue;
+    const cells: unknown[] = [
+      r.name, r.code ?? "", round2(r.paid), round2(r.owed), round2(r.prepay),
+      round2(r.reimbursed ?? 0), round2(r.outstanding),
+    ];
     if (prevNet) {
       const pv = prevNet(r.person_id);
       cells.push(pv != null ? round2(r.outstanding - pv) : "");
@@ -1780,6 +1811,7 @@ function DiffList({ diff, nameOf, netOf, mode = "full" }: { diff: BundleDiff; na
         })}
       {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
       {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
+      {diff.paysheet.totalReimbursed && <li>Receipts paid back: {fmtChange(diff.paysheet.totalReimbursed)}</li>}
     </ul>
   );
 }
@@ -1950,13 +1982,13 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                             <thead>
                               <tr>
                                 <th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th>
-                                <th className="num">Pre-reimbursed</th><th className="num">Net</th>
+                                <th className="num">Pre-reimbursed</th><th className="num">Reimbursed</th><th className="num">Net</th>
                                 {hasPrev && <th className="num">± vs prev</th>}
                                 <th>Settlement</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay).map((r) => {
+                              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay || r.reimbursed).map((r) => {
                                 const o = r.outstanding;
                                 const lbl = Math.abs(o) < 0.005
                                   ? <span className="settled">—</span>
@@ -1968,6 +2000,7 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
                                     <td className="num">{r.paid ? money(r.paid) : ""}</td>
                                     <td className="num">{r.owed ? money(r.owed) : ""}</td>
                                     <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
+                                    <td className="num">{r.reimbursed ? money(r.reimbursed) : ""}</td>
                                     <td className="num">{lbl}</td>
                                     {hasPrev && (
                                       <td className="num">
@@ -2019,10 +2052,19 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   const [moveTo, setMoveTo] = useState<number>(0);
 
   const effectivePayer = payerRef || adultPool[0]?.ref || "";
-  const movable = (e: Expense) => !e.source_travel_group_id;
-  // A stale id (receipt deleted elsewhere) must never reach the move call.
-  const selectedIds = bundle.expenses.filter((e) => movable(e) && selected.has(e.id)).map((e) => e.id);
+  // Travel-generated rows are owned by the travel calculator, not by hand: they
+  // can't be moved, marked reimbursed, or selected for either.
+  const editable = (e: Expense) => !e.source_travel_group_id;
+  // A stale id (receipt deleted elsewhere) must never reach a bulk call.
+  const selectedIds = bundle.expenses.filter((e) => editable(e) && selected.has(e.id)).map((e) => e.id);
   const destination = costGroups.find((g) => g.id === moveTo) ?? costGroups[0];
+
+  // Progress over the receipts that can actually be settled by hand, so the
+  // count is one a treasurer can drive to zero.
+  const markable = bundle.expenses.filter(editable);
+  const reimbursedRows = markable.filter((e) => e.reimbursed_at);
+  const reimbursedTotal = reimbursedRows.reduce((sum, e) => sum + e.amount, 0);
+  const markableTotal = markable.reduce((sum, e) => sum + e.amount, 0);
 
   function toggle(id: number, on: boolean) {
     setSelected((prev) => {
@@ -2041,6 +2083,11 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   function move() {
     if (!destination || selectedIds.length === 0) return;
     run(() => api.moveExpenses(bundle.trip.id, selectedIds, destination.id)).then(() => setSelected(new Set()));
+  }
+
+  function markReimbursed(reimbursed: boolean) {
+    if (selectedIds.length === 0) return;
+    run(() => api.setExpensesReimbursed(bundle.trip.id, selectedIds, reimbursed)).then(() => setSelected(new Set()));
   }
 
   function add() {
@@ -2092,6 +2139,11 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
       {bundle.expenses.length > 0 && (
         <div className="toolbar" style={{ marginTop: 22 }}>
           <h2 style={{ margin: 0 }}>Receipts</h2>
+          <span className="hint">
+            {reimbursedRows.length > 0
+              ? `${reimbursedRows.length} of ${markable.length} paid back · ${money(reimbursedTotal)} of ${money(markableTotal)}`
+              : "None paid back yet"}
+          </span>
           <div className="spacer" />
           {editing ? (
             <button className="btn ghost" disabled={busy} onClick={stopEditing}>Done</button>
@@ -2112,6 +2164,14 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
           <button className="btn" disabled={busy || selectedIds.length === 0 || !destination} onClick={move}>
             Move{selectedIds.length > 0 && destination ? ` ${selectedIds.length} to ${destination.name}` : ""}
           </button>
+          {/* Settling a batch at once — the common case after writing one cheque
+              that covers several of a person's receipts. */}
+          <button className="btn ghost" disabled={busy || selectedIds.length === 0} onClick={() => markReimbursed(true)}>
+            ✓ Mark{selectedIds.length > 0 ? ` ${selectedIds.length}` : ""} reimbursed
+          </button>
+          <button className="btn ghost" disabled={busy || selectedIds.length === 0} onClick={() => markReimbursed(false)}>
+            Undo reimbursed
+          </button>
           {selectedIds.length > 0 && (
             <button className="btn ghost" disabled={busy} onClick={() => setSelected(new Set())}>Clear</button>
           )}
@@ -2123,8 +2183,8 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
         const rows = bundle.expenses.filter((e) => e.group_id === g.id);
         if (rows.length === 0) return null;
         const summary = bundle.groupSummaries.find((s) => s.group.id === g.id)!;
-        const groupMovable = rows.filter(movable);
-        const allChecked = groupMovable.length > 0 && groupMovable.every((e) => selected.has(e.id));
+        const groupEditable = rows.filter(editable);
+        const allChecked = groupEditable.length > 0 && groupEditable.every((e) => selected.has(e.id));
         return (
           <div key={g.id}>
             <h3>{g.name} — {money(summary.total)}{summary.totalShares > 0 && <> · {money(summary.perShare)}/share ({summary.totalShares} shares)</>}</h3>
@@ -2136,21 +2196,26 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                       <input
                         type="checkbox"
                         aria-label={`Select all receipts in ${g.name}`}
-                        disabled={busy || groupMovable.length === 0}
+                        disabled={busy || groupEditable.length === 0}
                         checked={allChecked}
-                        onChange={(ev) => groupMovable.forEach((e) => toggle(e.id, ev.target.checked))}
+                        onChange={(ev) => groupEditable.forEach((e) => toggle(e.id, ev.target.checked))}
                       />
                     </th>
                   )}
-                  <th>Receipt</th><th>Paid by</th><th className="num">Amount</th><th>Files</th><th></th>
+                  <th>Receipt</th><th>Paid by</th><th className="num">Amount</th>
+                  <th className="reimb-col">Reimbursed</th>
+                  <th>Files</th><th></th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((e) => (
-                  <tr key={e.id} className={editing && selected.has(e.id) ? "selected" : undefined}>
+                  <tr
+                    key={e.id}
+                    className={`${editing && selected.has(e.id) ? "selected" : ""}${e.reimbursed_at ? " reimbursed" : ""}`.trim() || undefined}
+                  >
                     {editing && (
                       <td className="check-col">
-                        {movable(e) && (
+                        {editable(e) && (
                           <input
                             type="checkbox"
                             aria-label={`Select ${e.description}`}
@@ -2164,9 +2229,34 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                     <td>{e.description}{e.source_travel_group_id && <span className="pill" style={{ marginLeft: 6 }}>auto</span>}</td>
                     <td>{personById.get(e.payer_id)?.name ?? "?"}</td>
                     <td className="num">{money(e.amount)}</td>
+                    {/* The mark itself: ticking it says this receipt has been
+                        paid back to its payer, so it stops counting toward what
+                        they're owed on the Reimbursement tab. Auto travel rows
+                        are regenerated from the travel calculator, so there's no
+                        stable receipt here to settle by hand. */}
+                    <td className="reimb-col">
+                      {editable(e) ? (
+                        <label className="reimb-toggle">
+                          <input
+                            type="checkbox"
+                            disabled={busy}
+                            checked={!!e.reimbursed_at}
+                            aria-label={`Mark ${e.description} reimbursed to ${personById.get(e.payer_id)?.name ?? "payer"}`}
+                            onChange={(ev) =>
+                              run(() => api.setExpensesReimbursed(bundle.trip.id, [e.id], ev.target.checked))
+                            }
+                          />
+                          {e.reimbursed_at
+                            ? <span className="pill pill-new" title={`Marked ${fmtTime(e.reimbursed_at)}${e.reimbursed_by ? ` by ${e.reimbursed_by}` : ""}`}>paid back</span>
+                            : <span className="hint">owed</span>}
+                        </label>
+                      ) : (
+                        <span className="hint" title="Generated by the travel calculator — settle the driver on the Reimbursement tab.">—</span>
+                      )}
+                    </td>
                     <td><AttachmentCell expense={e} run={run} busy={busy} /></td>
                     <td className="num">
-                      {!e.source_travel_group_id && (
+                      {editable(e) && (
                         <button className="btn danger" disabled={busy} onClick={() => run(() => api.deleteExpense(e.id))}>Delete</button>
                       )}
                     </td>

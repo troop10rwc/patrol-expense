@@ -118,6 +118,7 @@ export async function buildStatement(
       paid: row.paid,
       owed: row.owed,
       prepay: row.prepay,
+      reimbursed: row.reimbursed ?? 0,
       outstanding: row.outstanding,
       status: row.status,
       projected,

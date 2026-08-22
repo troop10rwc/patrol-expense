@@ -100,15 +100,20 @@ export function computePaysheet(input: EngineInput, summaries: GroupSummary[]): 
   for (const s of settlements) statusByPerson.set(s.person_id, s.status);
 
   const rows: PaysheetRow[] = adults.map((p) => {
-    const paid = round2(
-      expenses.filter((e) => e.payer_id === p.id).reduce((s, e) => s + e.amount, 0),
-    );
+    const mine = expenses.filter((e) => e.payer_id === p.id);
+    const paid = round2(mine.reduce((s, e) => s + e.amount, 0));
     const owed = round2(owedByAdult.get(p.id) ?? 0);
     const prepay = round2(
       prepayments.filter((pp) => pp.person_id === p.id).reduce((s, pp) => s + pp.amount, 0),
     );
+    // Receipts already handed back to this payer. They stay in `paid` (the
+    // trip's cost is unchanged and the receipt is still theirs) but no longer
+    // count toward what the troop still owes, exactly like a prepayment.
+    const reimbursed = round2(
+      mine.filter((e) => e.reimbursed_at != null).reduce((s, e) => s + e.amount, 0),
+    );
     const balance = round2(paid - owed);
-    const outstanding = round2(balance - prepay);
+    const outstanding = round2(balance - prepay - reimbursed);
     return {
       person_id: p.id,
       name: p.name,
@@ -116,6 +121,7 @@ export function computePaysheet(input: EngineInput, summaries: GroupSummary[]): 
       paid,
       owed,
       prepay,
+      reimbursed,
       balance,
       outstanding,
       status: statusByPerson.get(p.id) ?? "none",
@@ -124,5 +130,8 @@ export function computePaysheet(input: EngineInput, summaries: GroupSummary[]): 
 
   const totalExpenses = round2(expenses.reduce((s, e) => s + e.amount, 0));
   const totalPrepaid = round2(prepayments.reduce((s, p) => s + p.amount, 0));
-  return { rows, totalExpenses, totalPrepaid };
+  const totalReimbursed = round2(
+    expenses.filter((e) => e.reimbursed_at != null).reduce((s, e) => s + e.amount, 0),
+  );
+  return { rows, totalExpenses, totalPrepaid, totalReimbursed };
 }
