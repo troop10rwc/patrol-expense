@@ -111,7 +111,12 @@ export function buildNotice(
 
   const paidLines: NoticePaidLine[] = bundle.expenses
     .filter((e) => e.payer_id === personId)
-    .map((e) => ({ description: e.description, amount: round2(e.amount), groupName: groupName(e.group_id) }));
+    .map((e) => ({
+      description: e.description,
+      amount: round2(e.amount),
+      groupName: groupName(e.group_id),
+      reimbursed: e.reimbursed_at != null,
+    }));
 
   const prepayLines = bundle.prepayments
     .filter((p) => p.person_id === personId)
@@ -133,6 +138,7 @@ export function buildNotice(
     paid: round2(row.paid),
     owed: round2(row.owed),
     prepay: round2(row.prepay),
+    reimbursed: round2(row.reimbursed ?? 0),
     net: round2(row.outstanding),
     status: row.status,
     paymentInstructions: bundle.trip.payment_instructions?.trim() || null,
@@ -183,6 +189,7 @@ function summaryRows(n: PersonNotice): { label: string; value: string }[] {
   const rows: { label: string; value: string }[] = [];
   if (n.paid) rows.push({ label: "Receipts you paid", value: money(n.paid) });
   if (n.owed) rows.push({ label: "Your share of trip costs", value: `-${money(n.owed)}` });
+  if (n.reimbursed) rows.push({ label: "Receipts already paid back to you", value: `-${money(n.reimbursed)}` });
   if (n.prepay) rows.push({ label: "Already reimbursed to you", value: `-${money(n.prepay)}` });
   return rows;
 }

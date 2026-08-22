@@ -81,6 +81,12 @@ export interface Expense {
   amount: number;
   payer_id: number;
   source_travel_group_id: number | null;
+  /** When this receipt was paid back to its payer (SQLite UTC), or null while
+   *  the troop still owes it. Marked from the Expenses tab; subtracted from the
+   *  payer's net on the Reimbursement tab. */
+  reimbursed_at: string | null;
+  /** Member who marked it reimbursed — audit trail only. */
+  reimbursed_by: string | null;
   created_at: string;
   attachments: ExpenseAttachment[];
 }
@@ -124,9 +130,10 @@ export interface PaysheetRow {
   code: string | null;
   paid: number; // total receipts this person fronted
   owed: number; // sum of share_count * perShare across cost groups
-  prepay: number; // already reimbursed
+  prepay: number; // already reimbursed as a lump sum (prepayments)
+  reimbursed: number; // of `paid`, the receipts already paid back one by one
   balance: number; // paid - owed (positive => troop owes person)
-  outstanding: number; // balance - prepay (positive => still owed to person)
+  outstanding: number; // balance - prepay - reimbursed (positive => still owed)
   status: SettlementStatus;
 }
 
@@ -134,6 +141,7 @@ export interface Paysheet {
   rows: PaysheetRow[];
   totalExpenses: number;
   totalPrepaid: number;
+  totalReimbursed: number; // receipts marked paid back, across every payer
 }
 
 export interface TripBundle {
@@ -287,7 +295,8 @@ export interface StatementEvent {
   person_id: number; // the matched person within this trip
   paid: number; // receipts they fronted (live)
   owed: number; // their derived share (live)
-  prepay: number; // already reimbursed (live)
+  prepay: number; // already reimbursed as a lump sum (live)
+  reimbursed: number; // receipts of theirs already paid back (live)
   outstanding: number; // live net (positive => troop owes them)
   status: SettlementStatus;
   projected: boolean; // no snapshot yet, or live differs from the latest snapshot
@@ -337,6 +346,9 @@ export interface NoticePaidLine {
   description: string;
   amount: number;
   groupName: string;
+  /** This receipt has already been paid back — it no longer counts toward the
+   *  net, so the statement has to say so next to the line it cancels. */
+  reimbursed: boolean;
 }
 
 /**
@@ -354,7 +366,8 @@ export interface PersonNotice {
   paid: number;
   owed: number;
   prepay: number;
-  net: number; // paid - owed - prepay
+  reimbursed: number; // receipts of theirs already paid back
+  net: number; // paid - owed - prepay - reimbursed
   status: SettlementStatus;
   paymentInstructions: string | null;
   token: string; // the statement link's bearer token (to revoke it)

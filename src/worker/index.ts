@@ -556,6 +556,39 @@ api.patch("/expenses/:eid", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
+// Mark receipts as already paid back to whoever fronted them (or undo it).
+// Takes a batch so the Expenses tab's selection bar and its per-row toggle hit
+// the same endpoint. Auto travel rows are included on purpose: a driver's
+// mileage is the most common thing to settle one receipt at a time.
+api.post("/trips/:id/expenses/reimbursed", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const b = await c.req.json<{ ids?: number[]; reimbursed?: boolean }>();
+  const ids = (b.ids ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  if (ids.length === 0) return c.json(bad("ids are required"), 400);
+  if (typeof b.reimbursed !== "boolean") return c.json(bad("reimbursed must be a boolean"), 400);
+
+  const placeholders = ids.map(() => "?").join(",");
+  const found = await c.env.DB
+    .prepare(`SELECT id FROM expenses WHERE trip_id = ? AND id IN (${placeholders})`)
+    .bind(tripId, ...ids)
+    .all<{ id: number }>();
+  if ((found.results ?? []).length !== ids.length)
+    return c.json(bad("some receipts are unknown or on another trip"), 400);
+
+  // Re-marking an already-reimbursed receipt keeps the original timestamp: the
+  // mark records when it was actually settled, not the last time it was saved.
+  await c.env.DB
+    .prepare(
+      b.reimbursed
+        ? `UPDATE expenses SET reimbursed_at = COALESCE(reimbursed_at, datetime('now')), reimbursed_by = COALESCE(reimbursed_by, ?) WHERE id IN (${placeholders})`
+        : `UPDATE expenses SET reimbursed_at = NULL, reimbursed_by = NULL WHERE id IN (${placeholders})`,
+    )
+    .bind(...(b.reimbursed ? [c.get("user").email, ...ids] : ids))
+    .run();
+
+  return c.json(await bundleResponse(c.env.DB, tripId));
+});
+
 api.delete("/expenses/:eid", async (c) => {
   const eid = Number(c.req.param("eid"));
   const row = await c.env.DB.prepare("SELECT trip_id FROM expenses WHERE id = ?").bind(eid).first<{ trip_id: number }>();

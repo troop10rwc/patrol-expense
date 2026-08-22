@@ -343,6 +343,16 @@ th.check-col, td.check-col { width: 1%; padding-right: 0; }
 tbody tr.selected td { background: var(--t10-surface-3); }
 tbody tr.selected:hover td { background: var(--t10-surface-3); }
 
+/* ---- Receipt-level reimbursement mark ("this one has been paid back") ---- */
+th.reimb-col, td.reimb-col { width: 1%; white-space: nowrap; }
+.reimb-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.reimb-toggle input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
+.reimb-toggle .hint { font-size: var(--t10-fs-xs); }
+/* Settled receipts recede: they still count toward the trip's cost, but there's
+   nothing left to do about them. */
+tbody tr.reimbursed td { color: var(--t10-ink-soft); }
+tbody tr.reimbursed td:first-child { box-shadow: inset 2px 0 0 var(--t10-status-ok-fg); }
+
 /* ---- Reimbursement notices (the emailed statement + its corrections) ---- */
 td.notice-cell { white-space: nowrap; }
 td.notice-cell .pill { margin-left: 6px; vertical-align: middle; }

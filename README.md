@@ -120,3 +120,10 @@ for anyone who owes, and copied forward to each new trip.
   trip are projected into a local `people` table (`source='roster'`); guests are
   `source='local'` and never written back to roster-db.
 - Travel reimbursements are materialized as expenses so they flow into the paysheet.
+- Two things reduce what the troop still owes a person, and they stay separate:
+  a **prepayment** (a lump sum handed over, entered against the person) and a
+  **reimbursed receipt** (tick the *Reimbursed* box on the Expenses tab to say
+  that one receipt has been paid back to whoever fronted it). Both are
+  subtracted from that person's net on the Reimbursement tab; neither changes
+  the trip's total cost or anyone's share. Auto travel rows can be marked too —
+  the mark survives a travel recalculation as long as the amount doesn't move.
