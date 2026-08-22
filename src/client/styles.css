@@ -347,7 +347,6 @@ tbody tr.selected:hover td { background: var(--t10-surface-3); }
 th.reimb-col, td.reimb-col { width: 1%; white-space: nowrap; }
 .reimb-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .reimb-toggle input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
-.reimb-toggle .hint { font-size: var(--t10-fs-xs); }
 /* Settled receipts recede: they still count toward the trip's cost, but there's
    nothing left to do about them. */
 tbody tr.reimbursed td { color: var(--t10-ink-soft); }
