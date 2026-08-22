@@ -558,8 +558,9 @@ api.patch("/expenses/:eid", async (c) => {
 
 // Mark receipts as already paid back to whoever fronted them (or undo it).
 // Takes a batch so the Expenses tab's selection bar and its per-row toggle hit
-// the same endpoint. Auto travel rows are included on purpose: a driver's
-// mileage is the most common thing to settle one receipt at a time.
+// the same endpoint. Travel-generated rows are excluded for the same reason
+// they can't be moved: the travel calculator owns them and rewrites them on
+// every recalculation, so a hand-set mark has nothing durable to attach to.
 api.post("/trips/:id/expenses/reimbursed", async (c) => {
   const tripId = Number(c.req.param("id"));
   const b = await c.req.json<{ ids?: number[]; reimbursed?: boolean }>();
@@ -569,11 +570,13 @@ api.post("/trips/:id/expenses/reimbursed", async (c) => {
 
   const placeholders = ids.map(() => "?").join(",");
   const found = await c.env.DB
-    .prepare(`SELECT id FROM expenses WHERE trip_id = ? AND id IN (${placeholders})`)
+    .prepare(
+      `SELECT id FROM expenses WHERE trip_id = ? AND source_travel_group_id IS NULL AND id IN (${placeholders})`,
+    )
     .bind(tripId, ...ids)
     .all<{ id: number }>();
   if ((found.results ?? []).length !== ids.length)
-    return c.json(bad("some receipts are unknown or on another trip"), 400);
+    return c.json(bad("some receipts can't be marked (unknown, on another trip, or travel-generated)"), 400);
 
   // Re-marking an already-reimbursed receipt keeps the original timestamp: the
   // mark records when it was actually settled, not the last time it was saved.

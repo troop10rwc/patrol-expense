@@ -101,12 +101,9 @@ export async function loadTripBundle(db: D1Database, tripId: number): Promise<Tr
  * driver (payer = driver, amount = reimbursement) charged to the travel
  * group's cost_group_id. Keeps the paysheet in sync with travel inputs.
  *
- * These rows are deleted and reinserted wholesale, so a driver already paid
- * back for their mileage would silently go back to being owed. Their
- * "reimbursed" mark is therefore carried across — but only when the figure it
- * was set against is unchanged: if the miles, rate or tolls moved, the amount
- * the treasurer settled no longer holds and the mark is dropped rather than
- * re-applied to a number nobody has paid.
+ * Wholesale delete-and-reinsert, which is why these rows can't carry a
+ * hand-set "reimbursed" mark: nothing here survives a recalculation. A driver
+ * who has been paid back is settled on the Reimbursement tab instead.
  */
 export async function regenerateTravelExpenses(db: D1Database, groupId: number): Promise<void> {
   const group = await db.prepare("SELECT * FROM cost_groups WHERE id = ?").bind(groupId).first<CostGroup>();
@@ -114,23 +111,10 @@ export async function regenerateTravelExpenses(db: D1Database, groupId: number):
   const trip = await db.prepare("SELECT * FROM trips WHERE id = ?").bind(group.trip_id).first<Trip>();
   if (!trip) return;
 
-  const target = group.cost_group_id ?? groupId;
-  const amount = travelReimbursement(trip, group);
-
-  const prior = await db
-    .prepare(
-      "SELECT payer_id, amount, reimbursed_at, reimbursed_by FROM expenses WHERE source_travel_group_id = ? AND reimbursed_at IS NOT NULL",
-    )
-    .bind(groupId)
-    .all<{ payer_id: number; amount: number; reimbursed_at: string; reimbursed_by: string | null }>();
-  const settled = new Map(
-    (prior.results ?? [])
-      .filter((r) => Math.abs(r.amount - amount) < 0.005)
-      .map((r) => [r.payer_id, r] as const),
-  );
-
   await db.prepare("DELETE FROM expenses WHERE source_travel_group_id = ?").bind(groupId).run();
 
+  const target = group.cost_group_id ?? groupId;
+  const amount = travelReimbursement(trip, group);
   if (amount <= 0) return;
 
   const drivers = await db
@@ -138,23 +122,13 @@ export async function regenerateTravelExpenses(db: D1Database, groupId: number):
     .bind(groupId)
     .all<{ person_id: number }>();
 
-  const stmts = drivers.results.map((d) => {
-    const was = settled.get(d.person_id);
-    return db
+  const stmts = drivers.results.map((d) =>
+    db
       .prepare(
-        "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id, source_travel_group_id, reimbursed_at, reimbursed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id, source_travel_group_id) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .bind(
-        trip.id,
-        target,
-        `Travel reimbursement: ${group.name}`,
-        amount,
-        d.person_id,
-        groupId,
-        was?.reimbursed_at ?? null,
-        was?.reimbursed_by ?? null,
-      );
-  });
+      .bind(trip.id, target, `Travel reimbursement: ${group.name}`, amount, d.person_id, groupId),
+  );
   if (stmts.length) await db.batch(stmts);
 }
 

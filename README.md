@@ -125,5 +125,6 @@ for anyone who owes, and copied forward to each new trip.
   **reimbursed receipt** (tick the *Reimbursed* box on the Expenses tab to say
   that one receipt has been paid back to whoever fronted it). Both are
   subtracted from that person's net on the Reimbursement tab; neither changes
-  the trip's total cost or anyone's share. Auto travel rows can be marked too —
-  the mark survives a travel recalculation as long as the amount doesn't move.
+  the trip's total cost or anyone's share. Auto travel rows can't be marked —
+  the travel calculator rewrites them on every recalculation, so there's no
+  durable receipt to settle; pay those drivers off on the Reimbursement tab.

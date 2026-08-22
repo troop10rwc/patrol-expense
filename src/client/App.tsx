@@ -2052,19 +2052,19 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   const [moveTo, setMoveTo] = useState<number>(0);
 
   const effectivePayer = payerRef || adultPool[0]?.ref || "";
-  const movable = (e: Expense) => !e.source_travel_group_id;
+  // Travel-generated rows are owned by the travel calculator, not by hand: they
+  // can't be moved, marked reimbursed, or selected for either.
+  const editable = (e: Expense) => !e.source_travel_group_id;
   // A stale id (receipt deleted elsewhere) must never reach a bulk call.
-  const selectedRows = bundle.expenses.filter((e) => selected.has(e.id));
-  const selectedIds = selectedRows.map((e) => e.id);
-  // Auto travel rows can be settled like any other receipt, but their cost
-  // group is owned by the travel calculator — so they select, but don't move.
-  const movableIds = selectedRows.filter(movable).map((e) => e.id);
+  const selectedIds = bundle.expenses.filter((e) => editable(e) && selected.has(e.id)).map((e) => e.id);
   const destination = costGroups.find((g) => g.id === moveTo) ?? costGroups[0];
 
-  // Progress across every receipt on the trip, so the tab shows at a glance how
-  // much of what people fronted has actually been handed back.
-  const reimbursedRows = bundle.expenses.filter((e) => e.reimbursed_at);
+  // Progress over the receipts that can actually be settled by hand, so the
+  // count is one a treasurer can drive to zero.
+  const markable = bundle.expenses.filter(editable);
+  const reimbursedRows = markable.filter((e) => e.reimbursed_at);
   const reimbursedTotal = reimbursedRows.reduce((sum, e) => sum + e.amount, 0);
+  const markableTotal = markable.reduce((sum, e) => sum + e.amount, 0);
 
   function toggle(id: number, on: boolean) {
     setSelected((prev) => {
@@ -2081,8 +2081,8 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
   }
 
   function move() {
-    if (!destination || movableIds.length === 0) return;
-    run(() => api.moveExpenses(bundle.trip.id, movableIds, destination.id)).then(() => setSelected(new Set()));
+    if (!destination || selectedIds.length === 0) return;
+    run(() => api.moveExpenses(bundle.trip.id, selectedIds, destination.id)).then(() => setSelected(new Set()));
   }
 
   function markReimbursed(reimbursed: boolean) {
@@ -2141,7 +2141,7 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
           <h2 style={{ margin: 0 }}>Receipts</h2>
           <span className="hint">
             {reimbursedRows.length > 0
-              ? `${reimbursedRows.length} of ${bundle.expenses.length} paid back · ${money(reimbursedTotal)} of ${money(bundle.paysheet.totalExpenses)}`
+              ? `${reimbursedRows.length} of ${markable.length} paid back · ${money(reimbursedTotal)} of ${money(markableTotal)}`
               : "None paid back yet"}
           </span>
           <div className="spacer" />
@@ -2161,8 +2161,8 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
               {costGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
             </select>
           </label>
-          <button className="btn" disabled={busy || movableIds.length === 0 || !destination} onClick={move}>
-            Move{movableIds.length > 0 && destination ? ` ${movableIds.length} to ${destination.name}` : ""}
+          <button className="btn" disabled={busy || selectedIds.length === 0 || !destination} onClick={move}>
+            Move{selectedIds.length > 0 && destination ? ` ${selectedIds.length} to ${destination.name}` : ""}
           </button>
           {/* Settling a batch at once — the common case after writing one cheque
               that covers several of a person's receipts. */}
@@ -2175,9 +2175,7 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
           {selectedIds.length > 0 && (
             <button className="btn ghost" disabled={busy} onClick={() => setSelected(new Set())}>Clear</button>
           )}
-          <span className="hint">
-            Auto travel receipts can be marked reimbursed, but not moved — change the travel group's cost group instead.
-          </span>
+          <span className="hint">Auto travel receipts can't be moved — change the travel group's cost group instead.</span>
         </div>
       )}
 
@@ -2185,7 +2183,8 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
         const rows = bundle.expenses.filter((e) => e.group_id === g.id);
         if (rows.length === 0) return null;
         const summary = bundle.groupSummaries.find((s) => s.group.id === g.id)!;
-        const allChecked = rows.every((e) => selected.has(e.id));
+        const groupEditable = rows.filter(editable);
+        const allChecked = groupEditable.length > 0 && groupEditable.every((e) => selected.has(e.id));
         return (
           <div key={g.id}>
             <h3>{g.name} — {money(summary.total)}{summary.totalShares > 0 && <> · {money(summary.perShare)}/share ({summary.totalShares} shares)</>}</h3>
@@ -2197,9 +2196,9 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                       <input
                         type="checkbox"
                         aria-label={`Select all receipts in ${g.name}`}
-                        disabled={busy}
+                        disabled={busy || groupEditable.length === 0}
                         checked={allChecked}
-                        onChange={(ev) => rows.forEach((e) => toggle(e.id, ev.target.checked))}
+                        onChange={(ev) => groupEditable.forEach((e) => toggle(e.id, ev.target.checked))}
                       />
                     </th>
                   )}
@@ -2216,13 +2215,15 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                   >
                     {editing && (
                       <td className="check-col">
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${e.description}`}
-                          disabled={busy}
-                          checked={selected.has(e.id)}
-                          onChange={(ev) => toggle(e.id, ev.target.checked)}
-                        />
+                        {editable(e) && (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${e.description}`}
+                            disabled={busy}
+                            checked={selected.has(e.id)}
+                            onChange={(ev) => toggle(e.id, ev.target.checked)}
+                          />
+                        )}
                       </td>
                     )}
                     <td>{e.description}{e.source_travel_group_id && <span className="pill" style={{ marginLeft: 6 }}>auto</span>}</td>
@@ -2230,26 +2231,32 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                     <td className="num">{money(e.amount)}</td>
                     {/* The mark itself: ticking it says this receipt has been
                         paid back to its payer, so it stops counting toward what
-                        they're owed on the Reimbursement tab. */}
+                        they're owed on the Reimbursement tab. Auto travel rows
+                        are regenerated from the travel calculator, so there's no
+                        stable receipt here to settle by hand. */}
                     <td className="reimb-col">
-                      <label className="reimb-toggle">
-                        <input
-                          type="checkbox"
-                          disabled={busy}
-                          checked={!!e.reimbursed_at}
-                          aria-label={`Mark ${e.description} reimbursed to ${personById.get(e.payer_id)?.name ?? "payer"}`}
-                          onChange={(ev) =>
-                            run(() => api.setExpensesReimbursed(bundle.trip.id, [e.id], ev.target.checked))
-                          }
-                        />
-                        {e.reimbursed_at
-                          ? <span className="pill pill-new" title={`Marked ${fmtTime(e.reimbursed_at)}${e.reimbursed_by ? ` by ${e.reimbursed_by}` : ""}`}>paid back</span>
-                          : <span className="hint">owed</span>}
-                      </label>
+                      {editable(e) ? (
+                        <label className="reimb-toggle">
+                          <input
+                            type="checkbox"
+                            disabled={busy}
+                            checked={!!e.reimbursed_at}
+                            aria-label={`Mark ${e.description} reimbursed to ${personById.get(e.payer_id)?.name ?? "payer"}`}
+                            onChange={(ev) =>
+                              run(() => api.setExpensesReimbursed(bundle.trip.id, [e.id], ev.target.checked))
+                            }
+                          />
+                          {e.reimbursed_at
+                            ? <span className="pill pill-new" title={`Marked ${fmtTime(e.reimbursed_at)}${e.reimbursed_by ? ` by ${e.reimbursed_by}` : ""}`}>paid back</span>
+                            : <span className="hint">owed</span>}
+                        </label>
+                      ) : (
+                        <span className="hint" title="Generated by the travel calculator — settle the driver on the Reimbursement tab.">—</span>
+                      )}
                     </td>
                     <td><AttachmentCell expense={e} run={run} busy={busy} /></td>
                     <td className="num">
-                      {!e.source_travel_group_id && (
+                      {editable(e) && (
                         <button className="btn danger" disabled={busy} onClick={() => run(() => api.deleteExpense(e.id))}>Delete</button>
                       )}
                     </td>
