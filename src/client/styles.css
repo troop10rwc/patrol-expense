@@ -344,7 +344,7 @@ tbody tr.selected td { background: var(--t10-surface-3); }
 tbody tr.selected:hover td { background: var(--t10-surface-3); }
 
 /* ---- Receipt-level reimbursement mark ("this one has been paid back") ---- */
-th.reimb-col, td.reimb-col { width: 1%; white-space: nowrap; }
+th.reimb-col, td.reimb-col { width: 1%; white-space: nowrap; text-align: center; }
 .reimb-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .reimb-toggle input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
 /* Settled receipts recede: they still count toward the trip's cost, but there's
