@@ -25,6 +25,10 @@ at `troop10rwc.org/manage/expenses`.
     `remote: true` binding.
 - Pure-TS **paysheet engine** (`src/worker/engine.ts`); no ORM — hand-written SQL
   via the D1 client.
+- **Cloudflare R2** (`RECEIPTS`) — receipt images/PDFs and photos off emailed
+  replies. Never a public bucket; served through authenticated Worker routes.
+- **Cloudflare Queues** — `patrol-expense-email-events` carries Email Sending
+  delivery events into the Worker's `queue()` handler (`src/worker/events.ts`).
 
 ## Frontend
 - **React 19** + **Vite 6** SPA, TypeScript, hand-written CSS (no UI framework).
@@ -47,6 +51,13 @@ at `troop10rwc.org/manage/expenses`.
 - **Google Maps Platform** — Places API (New) for address autocomplete + Routes
   API for most-direct driving distance, proxied server-side through the Worker
   (`src/worker/geo.ts`; key kept as a `wrangler secret`).
+- **Cloudflare Email Service** — reimbursement notices go out through the
+  `send_email` binding (`src/worker/mail.ts`) as `expenses@troop10rwc.org`, and
+  replies come back through **Email Routing** on `reply.troop10rwc.org` into the
+  Worker's `email()` handler (`src/worker/inbound.ts`), filed as corrections.
+  The domain coexists with **Google Workspace**: sending records live on
+  `cf-bounce.troop10rwc.org` and routing is scoped to a subdomain, so the apex MX
+  stays Google's. Setup runbook in [README](./README.md#email-setup).
 
 ## Tooling & language
 - **TypeScript** end-to-end with shared types (`src/shared/`) between client and

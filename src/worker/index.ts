@@ -9,6 +9,7 @@ import type {
   OutstandingExpense,
   NoticeLink,
   Correction,
+  CorrectionAttachment,
   CorrectionStatus,
 } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
@@ -23,6 +24,10 @@ import { seedWinterLodge } from "./seed.ts";
 import { buildStatement } from "./statement.ts";
 import { buildNotice, buildPublicStatement, newLinkToken } from "./notice.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
+import { sendNotice, worthSending } from "./mail.ts";
+import { handleEmailEvents } from "./events.ts";
+import { handleInboundEmail } from "./inbound.ts";
+import { MAX_ATTACHMENT_BYTES, validateAttachment, safeFilename } from "./attachments.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
 interface Bindings extends AuthBindings {
@@ -30,6 +35,13 @@ interface Bindings extends AuthBindings {
   RECEIPTS: R2Bucket; // expense attachment files (receipts / PDFs)
   GOOGLE_MAPS_API_KEY?: string;
   ENVIRONMENT?: string; // "development" in dev (.dev.vars); "production" otherwise
+  // Outbound reimbursement notices. See mail.ts; the domain must be onboarded
+  // onto Cloudflare Email Sending before any of this does anything.
+  EMAIL: SendEmail;
+  MAIL_FROM?: string;
+  MAIL_FROM_NAME?: string;
+  REPLY_DOMAIN?: string; // Email Routing subdomain that catches replies
+  MAIL_FALLBACK?: string; // verified destination for mail we can't attribute
 }
 
 type Env = { Bindings: Bindings; Variables: { user: Identity } };
@@ -378,23 +390,9 @@ api.put("/groups/:gid/members", async (c) => {
 
 // ---- expense attachments (receipts) ----
 // Files live in R2 (RECEIPTS); expense_attachments is the metadata index. Only
-// images and PDFs, up to 10 MB each. Served back through the authenticated GET
+// images and PDFs, up to 10 MB each (the limits live in attachments.ts, shared
+// with the inbound mail handler). Served back through the authenticated GET
 // route below — never a public bucket, since receipts can carry personal info.
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-
-function validateAttachment(file: File): string | null {
-  if (!(file.type.startsWith("image/") || file.type === "application/pdf"))
-    return `Unsupported file type: ${file.type || "unknown"} (images and PDFs only)`;
-  if (file.size === 0) return `Empty file: ${file.name}`;
-  if (file.size > MAX_ATTACHMENT_BYTES) return `File too large: ${file.name} (max 10 MB)`;
-  return null;
-}
-
-// Sanitize for use in an R2 key and a Content-Disposition filename.
-function safeFilename(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? "file";
-  return base.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "file";
-}
 
 // Assumes the file already passed validateAttachment. Puts the object first so a
 // committed row always points at real bytes, then records the metadata row.
@@ -724,20 +722,27 @@ api.post("/trips/:id/notices", async (c) => {
 
   // One live link per (snapshot, person): re-preparing the same notice must
   // hand back the URL already in someone's inbox, not mint a second secret.
+  //
+  // Insert-then-read rather than read-then-insert, because check-then-act races
+  // here: two prepares for the same person overlap (a double-click, or React's
+  // StrictMode double-invoking the effect in dev), both find nothing, and the
+  // loser used to 500 on the unique index. DO NOTHING makes the insert
+  // idempotent; the SELECT after it returns whichever token won, so both callers
+  // get the same link — which is the invariant the index exists to protect.
+  await c.env.DB.prepare(
+    `INSERT INTO statement_links (token, trip_id, snapshot_id, person_id, created_by)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (snapshot_id, person_id) WHERE revoked_at IS NULL DO NOTHING`,
+  )
+    .bind(newLinkToken(), tripId, snap.id, personId, c.get("user").email)
+    .run();
   const existing = await c.env.DB.prepare(
     "SELECT token FROM statement_links WHERE snapshot_id = ? AND person_id = ? AND revoked_at IS NULL",
   )
     .bind(snap.id, personId)
     .first<{ token: string }>();
-  let token = existing?.token;
-  if (!token) {
-    token = newLinkToken();
-    await c.env.DB.prepare(
-      "INSERT INTO statement_links (token, trip_id, snapshot_id, person_id, created_by) VALUES (?, ?, ?, ?, ?)",
-    )
-      .bind(token, tripId, snap.id, personId, c.get("user").email)
-      .run();
-  }
+  if (!existing) return c.json(bad("could not prepare a statement link"), 500);
+  const token = existing.token;
 
   const notice = buildNotice(
     bundle,
@@ -750,13 +755,67 @@ api.post("/trips/:id/notices", async (c) => {
   return c.json(notice);
 });
 
+// Send a prepared notice. The message is rebuilt here from the snapshot rather
+// than accepting anything from the client: the email quotes a dollar figure, so
+// what goes out has to come from the same frozen bundle the statement page will
+// re-derive, with no opportunity for a caller to substitute their own numbers.
+api.post("/trips/:id/notices/:token/send", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const resolved = await resolveLink(c.env.DB, c.req.param("token"), c.req.url);
+  if (!resolved || resolved.link.trip_id !== tripId) {
+    return c.json(bad("that statement link is no longer valid — prepare the notice again"), 404);
+  }
+  const { notice } = resolved;
+
+  if (!c.env.MAIL_FROM) {
+    return c.json(bad("sending isn't configured yet — this app's domain still needs onboarding onto Cloudflare Email Sending"), 503);
+  }
+  if (!(notice.person.email ?? "").trim()) {
+    return c.json(bad(`no email address on file for ${notice.person.name} — copy the message and send it yourself`), 422);
+  }
+  if (!worthSending(notice)) {
+    return c.json(bad("that person's balance is zero, so there's nothing to tell them"), 422);
+  }
+
+  // Re-sending is legitimate (a bounce, a corrected address, a nudge), but it
+  // should be a decision rather than a double-click. Prior FAILED attempts don't
+  // count — nothing reached anyone.
+  if (c.req.query("resend") !== "1") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM notice_sends WHERE token = ? AND status NOT IN ('failed','rejected') LIMIT 1",
+    )
+      .bind(notice.token)
+      .first<{ id: number }>();
+    if (prior) return c.json(bad("this notice has already been sent — resend to send it again"), 409);
+  }
+
+  const outcome = await sendNotice(c.env, notice, tripId, c.get("user").email);
+  if (outcome.status === "failed") {
+    return c.json({ error: outcome.error_detail ?? "the message could not be sent", code: outcome.error_code }, 502);
+  }
+  return c.json({ ok: true, send_id: outcome.id, to: notice.person.email, status: outcome.status });
+});
+
 // Links already handed out for this trip — the tab uses these to show who has
-// been written to, and from which snapshot.
+// been written to, from which snapshot, and what became of the message.
 api.get("/trips/:id/notices", async (c) => {
   const { results } = await c.env.DB.prepare(
-    // Newest first. The key is the token itself, so insertion order is rowid —
-    // there's no `id` column on this table.
-    "SELECT token, person_id, snapshot_id, created_by, created_at FROM statement_links WHERE trip_id = ? AND revoked_at IS NULL ORDER BY rowid DESC",
+    // Newest link first. The key is the token itself, so insertion order is
+    // rowid — there's no `id` column on statement_links.
+    //
+    // The correlated subqueries pick the LATEST send per link: a resend is a new
+    // notice_sends row, and the column should show where the most recent attempt
+    // got to, not the first one.
+    `SELECT sl.token, sl.person_id, sl.snapshot_id, sl.created_by, sl.created_at,
+            sl.first_viewed_at, sl.last_viewed_at, sl.view_count,
+            ns.id AS send_id, ns.status AS send_status, ns.to_email AS send_to,
+            ns.sent_at AS send_at, ns.error_detail AS send_error,
+            (SELECT COUNT(*) FROM notice_sends WHERE token = sl.token) AS send_count
+       FROM statement_links sl
+       LEFT JOIN notice_sends ns
+              ON ns.id = (SELECT id FROM notice_sends WHERE token = sl.token ORDER BY id DESC LIMIT 1)
+      WHERE sl.trip_id = ? AND sl.revoked_at IS NULL
+      ORDER BY sl.rowid DESC`,
   )
     .bind(Number(c.req.param("id")))
     .all<NoticeLink>();
@@ -774,15 +833,50 @@ api.delete("/notices/:token", async (c) => {
 
 // ---- corrections (reported from a shared statement; reviewed here) ----
 api.get("/trips/:id/corrections", async (c) => {
+  const tripId = Number(c.req.param("id"));
   const { results } = await c.env.DB.prepare(
     `SELECT co.*, COALESCE(p.name, co.reporter_name, '#' || co.person_id) AS personName
        FROM corrections co LEFT JOIN people p ON p.id = co.person_id
       WHERE co.trip_id = ?
       ORDER BY (co.status = 'open') DESC, co.id DESC`,
   )
-    .bind(Number(c.req.param("id")))
+    .bind(tripId)
     .all<Correction>();
-  return c.json(results);
+
+  // Photos, from replies that came back by email. Fetched in one query and
+  // grouped in memory rather than per-correction — the queue renders as a list.
+  const { results: files } = await c.env.DB.prepare(
+    "SELECT id, correction_id, filename, content_type, size FROM correction_attachments WHERE trip_id = ? ORDER BY id",
+  )
+    .bind(tripId)
+    .all<CorrectionAttachment>();
+  const byCorrection = new Map<number, CorrectionAttachment[]>();
+  for (const f of files ?? []) {
+    const list = byCorrection.get(f.correction_id) ?? [];
+    list.push(f);
+    byCorrection.set(f.correction_id, list);
+  }
+
+  return c.json((results ?? []).map((co) => ({ ...co, attachments: byCorrection.get(co.id) ?? [] })));
+});
+
+// A photo that arrived attached to an emailed correction. Same authenticated,
+// streamed-through-the-Worker treatment as expense receipts: the bucket is never
+// public, and a reply can carry anything a parent decided to photograph.
+api.get("/correction-attachments/:aid", async (c) => {
+  const row = await c.env.DB
+    .prepare("SELECT r2_key, filename, content_type FROM correction_attachments WHERE id = ?")
+    .bind(Number(c.req.param("aid")))
+    .first<{ r2_key: string; filename: string; content_type: string }>();
+  if (!row) return c.json(bad("attachment not found"), 404);
+  const obj = await c.env.RECEIPTS.get(row.r2_key);
+  if (!obj) return c.json(bad("file not found"), 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("Content-Type", row.content_type);
+  headers.set("Content-Disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+  headers.set("Cache-Control", "private, max-age=3600");
+  return new Response(obj.body, { headers });
 });
 
 api.patch("/corrections/:cid", async (c) => {
@@ -1040,10 +1134,37 @@ async function reportedCorrections(db: D1Database, tripId: number, personId: num
   return results;
 }
 
+/**
+ * Count a read of the statement.
+ *
+ * This is the app's only trustworthy "did they see it" signal, and the reason
+ * there's no tracking pixel in the email: a mail client fetching an image proves
+ * nothing (Apple Mail Privacy Protection fetches them unread), whereas this
+ * fires on the page's own data request — a real person, on the page.
+ *
+ * Deliberately fire-and-forget via waitUntil: a counter must never delay or
+ * fail the statement a parent is trying to read.
+ */
+function countStatementView(c: { env: Bindings; executionCtx: ExecutionContext }, token: string): void {
+  c.executionCtx.waitUntil(
+    c.env.DB.prepare(
+      `UPDATE statement_links
+          SET view_count = view_count + 1,
+              first_viewed_at = COALESCE(first_viewed_at, datetime('now')),
+              last_viewed_at = datetime('now')
+        WHERE token = ?`,
+    )
+      .bind(token)
+      .run()
+      .catch(() => {}),
+  );
+}
+
 app.get("/api/public/statement/:token", async (c) => {
   const resolved = await resolveLink(c.env.DB, c.req.param("token"), c.req.url);
   if (!resolved) return c.json(bad("this statement link is no longer valid"), 404);
   const { link, bundle, notice } = resolved;
+  countStatementView(c, link.token);
   // Identity comes from the frozen bundle, not the live people table: the row
   // may be gone, and the link's promise is about who they were at capture time.
   const email = bundle.people.find((p) => p.id === link.person_id)?.email ?? null;
@@ -1128,6 +1249,24 @@ export default class ExpenseWorker extends WorkerEntrypoint<Bindings> {
     const assetUrl = new URL(url);
     assetUrl.pathname = rel;
     return env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+  }
+
+  /**
+   * Delivery lifecycle for sent notices, from the Cloudflare Email Sending event
+   * subscription. Folded into notice_sends so the Reimbursement tab can show
+   * "delivered" or "bounced" rather than just "we pressed send". See events.ts.
+   */
+  async queue(batch: MessageBatch): Promise<void> {
+    await handleEmailEvents(batch, this.env.DB);
+  }
+
+  /**
+   * Replies to a notice, caught by the REPLY_DOMAIN catch-all and filed as
+   * corrections. This is what keeps sending from the app as answerable as the
+   * old copy-into-your-own-client flow was. See inbound.ts.
+   */
+  async email(message: ForwardableEmailMessage): Promise<void> {
+    await handleInboundEmail(message, this.env);
   }
 
   /**

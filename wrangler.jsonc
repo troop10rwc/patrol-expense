@@ -12,7 +12,21 @@
     "ENVIRONMENT": "production",
     // Origin of the identity service: login/logout + the auth Worker that issues
     // sessions. The SPA builds its sign-in/sign-out links from this.
-    "AUTH_ORIGIN": "https://id.troop10rwc.org"
+    "AUTH_ORIGIN": "https://id.troop10rwc.org",
+    // Reimbursement notices are sent as this identity. The domain must be
+    // onboarded onto Cloudflare Email Sending, which parks its SPF/DKIM/bounce
+    // records on cf-bounce.troop10rwc.org — the apex MX (Google Workspace) is
+    // untouched, so troop mail keeps flowing through Google as before.
+    "MAIL_FROM": "expenses@troop10rwc.org",
+    "MAIL_FROM_NAME": "Troop 10 Expenses",
+    // Replies go to r+<statement token>@<this>, an Email Routing subdomain whose
+    // catch-all lands in this Worker's email() handler and files the reply as a
+    // correction. It is deliberately NOT the apex: Email Routing owns the MX of
+    // whatever name it's enabled on, and the apex belongs to Google Workspace.
+    "REPLY_DOMAIN": "reply.troop10rwc.org",
+    // Where mail we can't attribute to a notice gets forwarded instead of being
+    // dropped. Must be a verified Email Routing destination address.
+    "MAIL_FALLBACK": "treasurer@troop10rwc.org"
   },
   // Serve the app as a same-origin tab at troop10rwc.org/manage/expenses.
   // Requires troop10rwc.org to be a Cloudflare zone on this account (proxied
@@ -45,6 +59,35 @@
       "bucket_name": "patrol-expense-receipts"
     }
   ],
+  // Outbound mail (reimbursement notices). Restricted to the one address the app
+  // is allowed to be: a bug can send the wrong content, but it can never send as
+  // somebody else at troop10rwc.org.
+  //
+  // For local dev add "remote": true to proxy sends to the real service — mail
+  // actually goes out, so use an address you own. Take it back out before
+  // deploying.
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["expenses@troop10rwc.org"]
+    }
+  ],
+  // Delivery lifecycle (delivered / deferred / bounced / failed / rejected /
+  // complained) arrives here from an Email Sending event subscription, and the
+  // queue() handler folds it into notice_sends. Create with:
+  //   wrangler queues create patrol-expense-email-events
+  //   wrangler queues create patrol-expense-email-events-dlq
+  "queues": {
+    "consumers": [
+      {
+        "queue": "patrol-expense-email-events",
+        "max_batch_size": 20,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "patrol-expense-email-events-dlq"
+      }
+    ]
+  },
   "d1_databases": [
     {
       "binding": "DB",

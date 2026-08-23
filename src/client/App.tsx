@@ -22,7 +22,7 @@ import type {
   PaysheetRow,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
-import { api, publicApi, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, type Me } from "./api.ts";
+import { api, publicApi, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, ApiError, type Me } from "./api.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 import { BackOfficeTopNav } from "@troop10rwc/ui";
 
@@ -1228,6 +1228,7 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
         row={noticeFor}
         snapshots={snapshots}
         stale={!!changes?.diff?.hasChanges}
+        link={noticeByPerson.get(noticeFor.person_id)}
         onClose={() => setNoticeFor(null)}
         onPrepared={() => { api.listNotices(tripId).then(setNotices).catch(() => {}); }}
       />
@@ -1321,12 +1322,13 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                         const link = noticeByPerson.get(r.person_id);
                         if (!link) return null;
                         const current = link.snapshot_id === snapshots[0]?.id;
+                        const d = deliveryChip(link);
                         return (
                           <span
-                            className={`pill ${current ? "pill-new" : ""}`}
-                            title={`Statement link created ${fmtTime(link.created_at)}${current ? "" : " from an older snapshot"}`}
+                            className={`pill ${d.tone}`}
+                            title={`${d.title}${current ? "" : " · from an older snapshot"}`}
                           >
-                            {current ? "prepared" : "older"}
+                            {d.label}{current ? "" : " ·"}
                           </span>
                         );
                       })()}
@@ -1354,22 +1356,77 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
   );
 }
 
+/**
+ * What the Notice column says about one person.
+ *
+ * Ordered by what a treasurer most needs to act on, which is not the same as
+ * the message's chronological progress: a bounce or a spam report outranks
+ * everything, because those are the rows where someone is NOT going to find out
+ * what they owe.
+ *
+ * "read" means they opened their statement page. There's deliberately no
+ * "opened" state for the email itself — Cloudflare doesn't report opens, and a
+ * tracking pixel would mostly measure mail clients prefetching images rather
+ * than people reading anything.
+ */
+function deliveryChip(link: NoticeLink): { label: string; tone: string; title: string } {
+  const to = link.send_to ?? "them";
+  const when = link.send_at ? fmtTime(link.send_at) : "";
+  const again = link.send_count > 1 ? ` (sent ${link.send_count} times)` : "";
+
+  switch (link.send_status) {
+    case "complained":
+      return { label: "spam report", tone: "pill-bad", title: `${to} marked this as spam. Don't resend — reach them another way.` };
+    case "bounced":
+      return { label: "bounced", tone: "pill-bad", title: link.send_error ?? `Mail to ${to} failed permanently. Check the address on the roster.` };
+    case "rejected":
+      return { label: "rejected", tone: "pill-bad", title: link.send_error ?? "The mail service refused this message." };
+    case "failed":
+      return { label: "failed", tone: "pill-bad", title: link.send_error ?? "The message couldn't be sent." };
+  }
+
+  if (link.view_count > 0) {
+    return {
+      label: "read",
+      tone: "pill-good",
+      title: `${to} opened their statement ${fmtTime(link.last_viewed_at!)}${link.view_count > 1 ? ` (${link.view_count} times)` : ""}.`,
+    };
+  }
+
+  switch (link.send_status) {
+    case "delivered":
+      return { label: "delivered", tone: "pill-good", title: `Delivered to ${to}${again}. They haven't opened the statement yet.` };
+    case "deferred":
+      return { label: "delayed", tone: "pill-warn", title: `${to}'s mail server is deferring delivery. Cloudflare is still retrying.` };
+    case "sent":
+    case "queued":
+      return { label: "sent", tone: "", title: `Sent to ${to} ${when}${again}. Waiting on the mail service to confirm delivery.` };
+  }
+
+  return { label: "prepared", tone: "", title: `Statement link created ${fmtTime(link.created_at)}. Not sent yet.` };
+}
+
 // ------------------------------------------------------- Reimbursement notice
-// Prepare one person's email. The app never sends it: this hands back a draft
-// the treasurer sends from their own mail client, so the recipient's reply —
-// the fastest way to report a missing receipt — lands with a human who can act
-// on it, and no member ever gets mail from an address that can't be answered.
+// Prepare one person's email, preview it exactly as they'll see it, and send it.
+//
+// Sending from the app rather than the treasurer's own mailbox would normally
+// cost the recipient their reply — so it doesn't. Every notice carries a
+// Reply-To that routes back into this trip's corrections queue, which means the
+// fastest way to report a missing receipt (hit Reply) still reaches a human.
+// The clipboard and mailto: paths stay for people with no address on file.
 //
 // The figures always come from a snapshot, never from live data. An email
 // quoting "$128.42" has to still be explainable next week, after the trip has
 // moved on.
 function NoticeModal({
-  bundle, row, snapshots, stale, onClose, onPrepared,
+  bundle, row, snapshots, stale, link, onClose, onPrepared,
 }: {
   bundle: TripBundle;
   row: PaysheetRow;
   snapshots: SnapshotMeta[];
   stale: boolean;
+  /** Prior sends for this person, so the modal can say "already written to". */
+  link: NoticeLink | undefined;
   onClose: () => void;
   onPrepared: () => void;
 }) {
@@ -1379,6 +1436,8 @@ function NoticeModal({
   const [busy, setBusy] = useState(true);
   const [copied, setCopied] = useState<"rich" | "link" | null>(null);
   const [view, setView] = useState<"rich" | "plain">("rich");
+  const [sending, setSending] = useState(false);
+  const [sentTo, setSentTo] = useState<string | null>(null);
 
   // Re-prepare whenever the chosen snapshot changes. Preparing is idempotent
   // per (snapshot, person): it reuses the link already in someone's inbox
@@ -1436,6 +1495,30 @@ function NoticeModal({
     }
   }
 
+  /**
+   * Send it. The server rebuilds the message from the snapshot — nothing
+   * rendered here is trusted — and answers 409 if this notice has already gone
+   * out, which turns a double-click into a question rather than a second email.
+   */
+  async function send(resend = false) {
+    if (!notice) return;
+    setSending(true); setErr(null);
+    try {
+      const res = await api.sendNotice(bundle.trip.id, notice.token, resend);
+      setSentTo(res.to);
+      onPrepared();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && !resend) {
+        setSending(false);
+        if (confirm(`${row.name} has already been emailed this notice. Send it again?`)) return send(true);
+        return;
+      }
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function revoke() {
     if (!notice) return;
     if (!confirm("Revoke this statement link? Anyone who already has it will get a 'no longer valid' page, and preparing the email again will mint a new link.")) return;
@@ -1461,6 +1544,9 @@ function NoticeModal({
   // around 2KB), so point at the clipboard before it silently clips the email.
   const tooLongForMailto = !!mailto && mailto.length > 1900;
   const owes = !!notice && notice.net < -0.005;
+  // A prior send only counts as a warning while this modal is showing the same
+  // link it went out on — switching snapshots prepares a different notice.
+  const priorSend = !!link?.send_at && link.token === notice?.token;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -1539,41 +1625,77 @@ function NoticeModal({
               <pre className="notice-body">{notice.body}</pre>
             )}
 
+            {sentTo ? (
+              <div className="ok-note" style={{ marginTop: 12 }}>
+                Sent to <strong>{sentTo}</strong>. Delivery shows in the Notice column as the
+                mail service reports back.
+              </div>
+            ) : (
+              priorSend && (
+                <p className="hint warn-note" style={{ marginTop: 12 }}>
+                  Already emailed to {link?.send_to ?? "them"} {fmtTime(link!.send_at!)}
+                  {link!.send_count > 1 ? ` (${link!.send_count} times)` : ""}. Sending again will
+                  ask you to confirm.
+                </p>
+              )
+            )}
+
+            {/* One primary action. The clipboard and mailto: routes are still
+                here — they're the only way to reach someone with no address on
+                file — but they're no longer the main event. */}
             <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
-              <button className="btn" onClick={copyRich}>
-                {copied === "rich" ? "Copied ✓" : "Copy formatted email"}
-              </button>
-              <a
-                className="btn ghost"
-                href={mailto ?? "#"}
-                onClick={(e) => { if (!mailto) e.preventDefault(); }}
-                aria-disabled={!mailto}
-                title="Opens a draft in your mail app. Mail links can only carry plain text, so this sends the unformatted version."
+              <button
+                className="btn"
+                disabled={!email || sending || busy}
+                onClick={() => send()}
+                title={email ? `Send to ${email}` : "No email address on file for this person"}
               >
-                Open plain-text draft
-              </a>
-              <button className="btn ghost" onClick={() => copy("link", notice.url)}>
-                {copied === "link" ? "Copied ✓" : "Copy link only"}
+                {sending ? "Sending…" : sentTo ? "Send again" : "Send email"}
               </button>
               <div className="spacer" />
-              <button className="btn ghost danger" disabled={busy} onClick={revoke}>Revoke link</button>
+              <button className="btn ghost danger" disabled={busy || sending} onClick={revoke}>Revoke link</button>
               <button className="btn ghost" onClick={onClose}>Close</button>
             </div>
 
-            <p className="hint" style={{ marginTop: 10 }}>
-              <strong>Copy formatted email</strong> puts the formatted version on your clipboard —
-              paste it into a new message to {email ?? "them"} with the subject above and it keeps
-              its formatting. The plain-text draft is there for mail apps that don't take a paste.
-            </p>
-            {tooLongForMailto && (
-              <p className="hint warn-note">
-                The plain-text draft is long enough that some mail apps truncate it. Prefer the
-                formatted copy, or paste the plain text into a new message.
+            <details className="other-sends">
+              <summary className="hint">Other ways to send</summary>
+              <div className="row" style={{ marginTop: 8, alignItems: "center" }}>
+                <button className="btn ghost" onClick={copyRich}>
+                  {copied === "rich" ? "Copied ✓" : "Copy formatted email"}
+                </button>
+                <a
+                  className="btn ghost"
+                  href={mailto ?? "#"}
+                  onClick={(e) => { if (!mailto) e.preventDefault(); }}
+                  aria-disabled={!mailto}
+                  title="Opens a draft in your mail app. Mail links can only carry plain text, so this sends the unformatted version."
+                >
+                  Open plain-text draft
+                </a>
+                <button className="btn ghost" onClick={() => copy("link", notice.url)}>
+                  {copied === "link" ? "Copied ✓" : "Copy link only"}
+                </button>
+              </div>
+              <p className="hint" style={{ marginTop: 8 }}>
+                <strong>Copy formatted email</strong> puts the formatted version on your clipboard —
+                paste it into a new message to {email ?? "them"} with the subject above and it keeps
+                its formatting. The plain-text draft is there for mail apps that don't take a paste.
+                Sent this way, the app can't track delivery and their reply goes to you, not the
+                corrections queue.
               </p>
-            )}
+              {tooLongForMailto && (
+                <p className="hint warn-note">
+                  The plain-text draft is long enough that some mail apps truncate it. Prefer the
+                  formatted copy, or paste the plain text into a new message.
+                </p>
+              )}
+            </details>
+
             <p><small className="hint">
-              The link in the email needs no sign-in — anyone holding it can read {row.name}'s
-              statement, so send it only to them. Revoking it invalidates the URL immediately.
+              Sent from the troop's expenses address; replies come back into this trip's
+              corrections queue below. The link in the email needs no sign-in — anyone holding it
+              can read {row.name}'s statement, so it goes only to them. Revoking it invalidates the
+              URL immediately.
             </small></p>
           </>
         ) : null}
@@ -1642,10 +1764,39 @@ function Corrections({
                   {c.reporter_name && c.reporter_name !== c.personName && (
                     <div className="hint">sent by {c.reporter_name}</div>
                   )}
+                  {/* An emailed reply is worth marking: it came back through the
+                      Reply-To on the notice, so the address it arrived from is
+                      also the fastest way to answer it. */}
+                  {c.source === "email" && (
+                    <div className="hint" title={c.email_subject ?? undefined}>
+                      ↩ replied from {c.from_email ?? "email"}
+                    </div>
+                  )}
                 </td>
                 <td>{CORRECTION_LABELS[c.kind]}</td>
                 <td className="num">{c.amount != null ? money(c.amount) : ""}</td>
-                <td className="correction-msg">{c.message}</td>
+                <td className="correction-msg">
+                  {c.message}
+                  {c.attachments.length > 0 && (
+                    <div className="correction-photos">
+                      {c.attachments.map((a) => (
+                        <a
+                          key={a.id}
+                          href={api.correctionAttachmentUrl(a.id)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`${a.filename} (${Math.round(a.size / 1024)} KB)`}
+                        >
+                          {a.content_type.startsWith("image/") ? (
+                            <img src={api.correctionAttachmentUrl(a.id)} alt={a.filename} />
+                          ) : (
+                            <span className="pill">📄 {a.filename}</span>
+                          )}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td className="hint">{fmtTime(c.created_at)}</td>
                 <td className="num">
                   {c.status === "open" ? (
@@ -1664,9 +1815,9 @@ function Corrections({
         </table>
       )}
       <p><small className="hint">
-        Reported from the statement links emailed out of this tab. Resolving one just marks it
-        handled — fix the underlying receipt on the Expenses tab, then take a fresh snapshot
-        before emailing updated figures.
+        Reported from the statement links emailed out of this tab, or replied straight back to the
+        notice. Resolving one just marks it handled — fix the underlying receipt on the Expenses
+        tab, then take a fresh snapshot before emailing updated figures.
       </small></p>
     </div>
   );
