@@ -383,20 +383,85 @@ export interface PersonNotice {
   body: string;
 }
 
-/** An existing notice link, so the tab can show who has already been written to. */
+/**
+ * How far one sent notice got. Ordered least → most settled, which is also the
+ * order `rankStatus` uses to stop a late-arriving event from walking a message
+ * backwards (queue delivery is unordered).
+ *
+ * `queued` is ours — the row exists but the send hasn't returned yet. Everything
+ * from `sent` on mirrors a Cloudflare `cf.email.sending.message.*` event, except
+ * `failed`, which also covers a send the binding rejected outright.
+ */
+export type NoticeSendStatus =
+  | "queued"
+  | "sent"
+  | "deferred"
+  | "delivered"
+  | "failed"
+  | "rejected"
+  | "bounced"
+  | "complained";
+
+/** One attempt to email a person their notice. A resend is a new record. */
+export interface NoticeSend {
+  id: number;
+  token: string;
+  person_id: number;
+  snapshot_id: number;
+  to_email: string;
+  subject: string;
+  amount: number;
+  status: NoticeSendStatus;
+  error_code: string | null;
+  error_detail: string | null;
+  sent_by: string;
+  sent_at: string;
+  delivered_at: string | null;
+  status_at: string | null;
+}
+
+/**
+ * An existing notice link, so the tab can show who has already been written to —
+ * now carrying what happened to it. The `send_*` fields describe the most recent
+ * send for this link (null if it has only ever been prepared, not sent); the
+ * view fields are the recipient's own reads of the statement page.
+ */
 export interface NoticeLink {
   token: string;
   person_id: number;
   snapshot_id: number;
   created_by: string | null;
   created_at: string;
+  send_id: number | null;
+  send_status: NoticeSendStatus | null;
+  send_to: string | null;
+  send_at: string | null;
+  send_error: string | null;
+  /** How many times this link has been sent, across resends. */
+  send_count: number;
+  first_viewed_at: string | null;
+  last_viewed_at: string | null;
+  view_count: number;
 }
 
 export type CorrectionKind = "missing_expense" | "wrong_amount" | "not_mine" | "other";
 export type CorrectionStatus = "open" | "resolved";
+/** Where a correction came from: the statement page's form, or a reply to the
+ *  notice email routed back into the queue. */
+export type CorrectionSource = "form" | "email";
 
-/** A correction reported from a shared statement page. Inert until a leader
- *  acts on it — it never changes any expense by itself. */
+/** A photo or document that arrived attached to an emailed correction. */
+export interface CorrectionAttachment {
+  id: number;
+  correction_id: number;
+  filename: string;
+  content_type: string;
+  size: number;
+}
+
+/** A correction reported from a shared statement page, or replied back by
+ *  email. Inert until a leader acts on it — it never changes any expense by
+ *  itself. */
 export interface Correction {
   id: number;
   trip_id: number;
@@ -411,6 +476,12 @@ export interface Correction {
   created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  source: CorrectionSource;
+  /** Envelope sender of the reply, when `source` is "email". Not the header
+   *  From — that's spoofable; the envelope address is what actually delivered. */
+  from_email: string | null;
+  email_subject: string | null;
+  attachments: CorrectionAttachment[];
 }
 
 /** What the no-sign-in statement page renders for a link holder: the frozen

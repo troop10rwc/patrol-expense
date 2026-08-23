@@ -19,7 +19,8 @@ distances. Full details in [STACK.md](./STACK.md).
 
 ```
 src/shared    types + constants (BASE_PATH=/manage/expenses, HOME_ADDRESS)
-src/worker    Hono API, session auth, roster reader, geo proxy, seed, paysheet engine
+src/worker    Hono API, session auth, roster reader, geo proxy, seed, paysheet engine,
+              notice mail (mail.ts / events.ts / inbound.ts)
 src/client    React SPA (App.tsx), API client
 migrations    D1 schema
 ```
@@ -48,6 +49,21 @@ npm run deploy              # build + wrangler deploy (production)
   cross-database joins, so roster members used by a trip are projected into a
   local `people` table; guests are `source='local'`.
 - Secrets live in `.dev.vars` (gitignored) / `wrangler secret` — never commit them.
+- **Email coexists with Google Workspace, and that constraint is load-bearing.**
+  troop10rwc.org's apex MX and SPF belong to Google. Cloudflare Email *Sending*
+  is safe and already live — its records sit on `cf-bounce.<domain>` and the apex
+  is untouched (verified: DKIM `d=troop10rwc.org`, DMARC passing).
+- ⚠️ **Email *Routing* is enabled on this zone, and its apex DNS was undone by
+  hand.** Onboarding writes apex MX records that displace Google's (there's no
+  opt-out, and the Subdomains feature requires the apex to be onboarded first);
+  Google's MX was restored afterwards, so the zone permanently reads
+  `misconfigured` in the Email Routing UI. **That status is correct — do not
+  "fix" it.** Doing so would point apex MX at Cloudflare and break the troop's
+  inbound mail. Replies are scoped to `reply.troop10rwc.org`. If apex email DNS
+  ever needs re-touching, re-verify both directions before walking away; see
+  [README](./README.md#3-inbound-replies--apex-safe-but-the-order-matters).
+- Don't raise `_dmarc` past `p=none` without first checking the aggregate reports
+  for other senders using the domain. Runbook: [README](./README.md#email-setup).
 - Run `npm run typecheck` before committing.
 
 ## Shared stack: @troop10rwc/kit

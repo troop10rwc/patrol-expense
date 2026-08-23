@@ -179,6 +179,11 @@ label.fld input, label.fld select { font: inherit; font-family: var(--t10-font-b
   color: var(--t10-status-neutral-fg); background: var(--t10-status-neutral-bg);
 }
 .pill-new { color: var(--t10-status-ok-fg); background: var(--t10-status-ok-bg); }
+/* Delivery outcome of an emailed notice. `pill-bad` is the one that matters:
+   it marks the people who are NOT going to find out what they owe. */
+.pill-good { color: var(--t10-status-ok-fg); background: var(--t10-status-ok-bg); }
+.pill-warn { color: var(--t10-status-warn-fg); background: var(--t10-status-warn-bg, var(--t10-status-neutral-bg)); }
+.pill-bad { color: var(--t10-clay-deep); background: var(--t10-clay-tint); }
 
 .kpi { display: flex; gap: 28px; flex-wrap: wrap; }
 .kpi .k { font-family: var(--t10-font-display); font-size: 9.5px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: var(--t10-ink-faint); }
@@ -357,6 +362,13 @@ td.notice-cell { white-space: nowrap; }
 td.notice-cell .pill { margin-left: 6px; vertical-align: middle; }
 td.correction-msg { white-space: pre-wrap; max-width: 420px; }
 
+/* Photos off an emailed reply — usually the receipt the message is about. */
+.correction-photos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.correction-photos img {
+  width: 68px; height: 68px; object-fit: cover;
+  border: 1px solid var(--t10-line); border-radius: var(--t10-r-sm); display: block;
+}
+
 /* Caution that isn't an error: the action is allowed, the leader just needs to
    know what they're about to send (stale figures, no payment details). */
 .warn-note {
@@ -364,6 +376,22 @@ td.correction-msg { white-space: pre-wrap; max-width: 420px; }
   background: var(--t10-amber-tint, var(--t10-surface-2));
   padding: 7px 10px; border-radius: var(--t10-r-sm); margin: 0 0 10px;
 }
+
+/* Confirmation that a write actually happened, as opposed to .warn-note's
+   "here's what you're about to do". */
+.ok-note {
+  border-left: 2px solid var(--t10-status-ok-fg, var(--t10-pine));
+  background: var(--t10-status-ok-bg, var(--t10-surface-2));
+  color: var(--t10-status-ok-fg, var(--t10-pine-deep));
+  padding: 7px 10px; border-radius: var(--t10-r-sm); margin: 0 0 10px;
+}
+
+/* Clipboard / mailto: fallbacks. Folded away so the modal has one obvious
+   action, but kept reachable — they're the only route to someone whose roster
+   row has no address. */
+.other-sends { margin-top: 12px; }
+.other-sends > summary { cursor: pointer; font-size: var(--t10-fs-sm); }
+.other-sends[open] > summary { margin-bottom: 4px; }
 
 .notice-modal { max-width: 720px; max-height: 84vh; overflow-y: auto; }
 

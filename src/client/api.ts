@@ -1,7 +1,7 @@
 import type {
   Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot,
   ImportPreview, PersonStatement, PersonNotice, NoticeLink, Correction, CorrectionKind,
-  CorrectionStatus, PublicStatement,
+  CorrectionStatus, PublicStatement, NoticeSendStatus,
 } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
@@ -11,6 +11,12 @@ export { HOME_ADDRESS } from "../shared/constants.ts";
  *  sign in. Carries the identity service origin when the Worker provided it. */
 export class UnauthorizedError extends Error {
   constructor(public authOrigin?: string) { super("unauthorized"); }
+}
+
+/** A failed request that kept its HTTP status, so callers can tell apart the
+ *  refusals they can offer a way past (409 "already sent") from real errors. */
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public code?: string) { super(message); }
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -24,7 +30,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body as any).error ?? `Request failed: ${res.status}`);
+    throw new ApiError((body as any).error ?? `Request failed: ${res.status}`, res.status, (body as any).code);
   }
   return res.json() as Promise<T>;
 }
@@ -160,18 +166,30 @@ export const api = {
 
   // ---- reimbursement notices ----
   // Preparing a notice mints (or reuses) that person's no-sign-in statement
-  // link and returns the rendered email. Nothing is sent from the app: the
-  // treasurer sends the draft from their own mail client so replies reach them.
+  // link and returns the rendered email; sending it is a separate, explicit
+  // step. Replies come back to the app (Reply-To routes into the corrections
+  // queue), so sending from here still reaches a human.
   prepareNotice: (tripId: number, person_id: number, snapshot_id?: number) =>
     req<PersonNotice>(`/api/trips/${tripId}/notices`, {
       method: "POST",
       body: JSON.stringify({ person_id, snapshot_id }),
     }),
+  // The message is rebuilt server-side from the snapshot — the client sends only
+  // the token, never the rendered body. `resend` is required to write to someone
+  // a second time; without it a repeat throws ApiError with status 409.
+  sendNotice: (tripId: number, token: string, resend = false) =>
+    req<{ ok: true; send_id: number; to: string; status: NoticeSendStatus }>(
+      `/api/trips/${tripId}/notices/${token}/send${resend ? "?resend=1" : ""}`,
+      { method: "POST" },
+    ),
   listNotices: (tripId: number) => req<NoticeLink[]>(`/api/trips/${tripId}/notices`),
   revokeNotice: (token: string) => req<{ ok: true }>(`/api/notices/${token}`, { method: "DELETE" }),
 
-  // ---- corrections reported from shared statements ----
+  // ---- corrections, reported from a shared statement or replied back by email ----
   listCorrections: (tripId: number) => req<Correction[]>(`/api/trips/${tripId}/corrections`),
+  // Photos that arrived attached to an emailed reply. Same-origin, so the
+  // session cookie rides along and this works directly as an <img> src.
+  correctionAttachmentUrl: (aid: number) => `${BASE_PATH}/api/correction-attachments/${aid}`,
   setCorrectionStatus: (cid: number, status: CorrectionStatus) =>
     req<{ ok: true }>(`/api/corrections/${cid}`, { method: "PATCH", body: JSON.stringify({ status }) }),
 
