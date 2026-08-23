@@ -343,14 +343,35 @@ legitimate source in them is aligned.
 
 ### 2. Delivery events
 
+Two queues carry the Email Sending lifecycle into the Worker's `queue()` handler:
+
 ```sh
 npx wrangler queues create patrol-expense-email-events
 npx wrangler queues create patrol-expense-email-events-dlq
 ```
 
-Then create an Email Sending **event subscription** targeting
-`patrol-expense-email-events`. The consumer is already declared in
-`wrangler.jsonc`.
+Then subscribe the queue to this zone's sending events. **Needs wrangler ≥ 4.125**
+— `--source email.sending` doesn't exist in earlier versions, and the repo's
+pinned wrangler may be older, hence `wrangler@latest`:
+
+```sh
+npx -y wrangler@latest queues subscription create patrol-expense-email-events --source email.sending --zone-id f5e862938ba258cbffe768a1a00da794 --domain troop10rwc.org --name patrol-expense-notice-delivery --events message.delivered,message.deferred,message.bounced,message.failed,message.rejected,message.complained
+```
+
+All six events matter: `events.ts` maps each to a status, and dropping any one
+leaves messages stuck at whatever they reached last. Verify with:
+
+```sh
+npx -y wrangler@latest queues subscription list patrol-expense-email-events
+```
+
+The consumer itself is declared in `wrangler.jsonc` and attaches on deploy —
+`wrangler queues list` should show `consumers: 1`. Note that `producers` stays
+`0`: an event subscription isn't a conventional producer, so the subscription
+list above is the authoritative check, not the producer count.
+
+Email *Routing* events (inbound forwards, replies, Worker-emitted routing) are
+**not** published here — this is outbound sending only.
 
 ### 3. Inbound replies — apex-safe, but the order matters
 
