@@ -109,6 +109,7 @@ export interface GroupMember {
 export interface DerivedShare {
   person_id: number;
   share_count: number;
+  amount: number; // this adult's cut of the group total, allocated to the cent
 }
 
 // ----- computed views -----
@@ -117,7 +118,7 @@ export interface GroupSummary {
   group: CostGroup;
   total: number; // total expenses charged to this group
   totalShares: number; // = number of attributable members
-  perShare: number; // total / totalShares (0 when no members)
+  perShare: number; // total / totalShares (0 when no members); display only — bill from shares[].amount
   memberIds: number[]; // everyone (adults + youth) attending this group
   shares: DerivedShare[]; // per-adult share counts derived from membership
   reimbursementPerDriver?: number; // travel groups only
@@ -129,7 +130,7 @@ export interface PaysheetRow {
   name: string;
   code: string | null;
   paid: number; // total receipts this person fronted
-  owed: number; // sum of share_count * perShare across cost groups
+  owed: number; // sum of this person's allocated share amounts across cost groups
   prepay: number; // already reimbursed as a lump sum (prepayments)
   reimbursed: number; // of `paid`, the receipts already paid back one by one
   balance: number; // paid - owed (positive => troop owes person)

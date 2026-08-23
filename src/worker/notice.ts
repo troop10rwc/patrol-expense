@@ -100,7 +100,9 @@ export function buildNotice(
       totalShares: s.totalShares,
       perShare: round2(s.perShare),
       shareCount: mine.share_count,
-      subtotal: round2(mine.share_count * s.perShare),
+      // Snapshots taken before shares carried an allocated amount fall back to
+      // the old per-share multiply, so old notices still render their figures.
+      subtotal: mine.amount ?? round2(mine.share_count * s.perShare),
       covers,
       expenses: bundle.expenses
         .filter((e) => e.group_id === s.group.id)
