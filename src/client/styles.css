@@ -297,6 +297,28 @@ tr.snapshot-detail table { margin: 0; background: var(--t10-surface); border: 1p
 .snapshot-actions a { margin-right: 10px; }
 .changed-key { background: var(--t10-amber-tint); box-shadow: inset 2px 0 0 var(--t10-amber); padding: 0 5px; border-radius: 3px; color: var(--t10-ink); }
 
+/* ------------------------------------- Reimbursement: what makes up "owed" */
+/* Selecting an adult opens the groups their share came from, same expand
+   pattern as the snapshot rows above. */
+.name-toggle {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; display: inline-flex; align-items: baseline; gap: 6px; text-align: left;
+}
+.name-toggle:hover { text-decoration: underline; }
+.name-toggle .caret { color: var(--t10-ink-faint); font-size: 10px; }
+tr.row-open > td { background: var(--t10-surface-3); }
+tr.share-detail > td { background: var(--t10-surface-2); padding: 10px 14px; }
+tr.share-detail .share-line { padding: 8px 0; }
+tr.share-detail .share-line:last-of-type { border-bottom: none; }
+.share-line.share-sum { border-top: 1px solid var(--t10-line); padding-top: 8px; }
+/* One attendee this line's shares pay for — the adult and any youth of theirs. */
+.share-who {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-family: var(--t10-font-mono); font-size: var(--t10-fs-xs);
+  padding: 1px 8px; margin: 0 4px 2px 0; border-radius: 20px;
+  color: var(--t10-ink); background: var(--chip);
+}
+
 /* ---- My statement (per-person summary across events) ---- */
 .stmt-total { text-align: center; }
 .stmt-total-label { font-size: var(--t10-fs-sm); color: var(--t10-ink-soft); display: flex; gap: 8px; align-items: center; justify-content: center; }
