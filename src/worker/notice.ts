@@ -87,10 +87,13 @@ export function buildNotice(
     const mine = s.shares.find((sh) => sh.person_id === personId);
     if (!mine || mine.share_count === 0) continue;
     // Which attendees those shares actually pay for: this adult, plus the youth
-    // whose share is attributed to them.
+    // whose share is attributed to them. A guest the unit is hosting is billed
+    // to the troop, not to their listed adult, so they're left out here —
+    // otherwise `covers` would name more people than `shareCount` pays for.
     const covers = s.memberIds
       .map((id) => bundle.people.find((p) => p.id === id))
-      .filter((p): p is NonNullable<typeof p> => !!p && (p.id === personId || p.parent_id === personId))
+      .filter((p): p is NonNullable<typeof p> =>
+        !!p && !p.unit_paid && (p.id === personId || p.parent_id === personId))
       .map((p) => p.name);
     shareLines.push({
       group_id: s.group.id,

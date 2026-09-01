@@ -29,6 +29,10 @@ export interface Person {
   parent_id: number | null;
   bsa_number: string | null;
   source: PersonSource;
+  /** Guest hosted by the troop: they still take a share of every cost group
+   *  they attend, but that share is billed to the unit instead of to a family.
+   *  Only ever set on source='local' guests. */
+  unit_paid: boolean;
   created_at: string;
 }
 
@@ -117,10 +121,12 @@ export interface DerivedShare {
 export interface GroupSummary {
   group: CostGroup;
   total: number; // total expenses charged to this group
-  totalShares: number; // = number of attributable members
+  totalShares: number; // = number of attributable members, unit-paid guests included
   perShare: number; // total / totalShares (0 when no members); display only — bill from shares[].amount
   memberIds: number[]; // everyone (adults + youth) attending this group
-  shares: DerivedShare[]; // per-adult share counts derived from membership
+  shares: DerivedShare[]; // per-adult share counts derived from membership (excludes the unit's)
+  unitShares: number; // of totalShares, the ones the unit is hosting
+  unitCovered: number; // those shares' cut of `total` — owed by the troop, not by a family
   reimbursementPerDriver?: number; // travel groups only
   driverIds?: number[]; // travel groups only
 }
@@ -143,6 +149,9 @@ export interface Paysheet {
   totalExpenses: number;
   totalPrepaid: number;
   totalReimbursed: number; // receipts marked paid back, across every payer
+  /** Cost the unit is absorbing for hosted guests. It's charged to no adult, so
+   *  sum(owed) = totalExpenses - totalUnitCovered — the troop covers the gap. */
+  totalUnitCovered: number;
 }
 
 export interface TripBundle {

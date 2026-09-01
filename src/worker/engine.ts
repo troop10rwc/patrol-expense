@@ -36,24 +36,41 @@ export interface EngineInput {
 }
 
 /**
+ * Stand-in shareholder for shares the unit is hosting (people.unit_paid). It
+ * rides through `allocate` like any other shareholder so the group total still
+ * splits to the cent, then is lifted back out as GroupSummary.unitCovered. 0 is
+ * never a real people.id — SQLite AUTOINCREMENT starts at 1.
+ */
+const UNIT_SHAREHOLDER_ID = 0;
+
+/**
  * Attribute each member of a group to a billable adult: a youth's share goes to
  * their parent adult; an adult's share goes to themselves. Returns a map of
  * adultId -> share_count for the group. Members whose share can't be attributed
  * to an adult (e.g. a youth with no parent) are dropped so the split balances.
+ *
+ * A guest the unit is paying for (unit_paid) still counts as a share — dropping
+ * them would quietly re-split their cost onto the other families — but it lands
+ * on UNIT_SHAREHOLDER_ID instead of on a family. So does a share that would
+ * otherwise flow *to* a unit-paid adult, e.g. their own attending youth: their
+ * whole household is hosted, and a share billed to someone the troop is
+ * covering isn't collectable from anyone.
  */
 function deriveShares(
   memberIds: number[],
   personById: Map<number, Person>,
 ): Map<number, number> {
   const counts = new Map<number, number>();
+  const bump = (id: number) => counts.set(id, (counts.get(id) ?? 0) + 1);
   for (const pid of memberIds) {
     const p = personById.get(pid);
     if (!p) continue;
+    if (p.unit_paid) { bump(UNIT_SHAREHOLDER_ID); continue; }
     const adultId = p.type === "adult" ? p.id : p.parent_id;
     if (adultId == null) continue; // youth with no responsible adult
     const adult = personById.get(adultId);
     if (!adult || adult.type !== "adult") continue;
-    counts.set(adultId, (counts.get(adultId) ?? 0) + 1);
+    bump(adult.unit_paid ? UNIT_SHAREHOLDER_ID : adultId);
   }
   return counts;
 }
@@ -142,10 +159,23 @@ export function computeGroupSummaries(input: EngineInput): GroupSummary[] {
     );
     const memberIds = members.filter((m) => m.group_id === group.id).map((m) => m.person_id);
     const shareCounts = deriveShares(memberIds, personById);
-    const shares = allocate(total, shareCounts, `${trip.uuid}:${group.id}`);
-    const totalShares = shares.reduce((s, r) => s + r.share_count, 0);
+    const allocated = allocate(total, shareCounts, `${trip.uuid}:${group.id}`);
+    // Every share (hosted guests included) counts toward the split, so perShare
+    // is what a family actually pays; only the unit's cut is billed to nobody.
+    const totalShares = allocated.reduce((s, r) => s + r.share_count, 0);
+    const unit = allocated.find((r) => r.person_id === UNIT_SHAREHOLDER_ID);
+    const shares = allocated.filter((r) => r.person_id !== UNIT_SHAREHOLDER_ID);
     const perShare = totalShares > 0 ? total / totalShares : 0;
-    const summary: GroupSummary = { group, total, totalShares, perShare, memberIds, shares };
+    const summary: GroupSummary = {
+      group,
+      total,
+      totalShares,
+      perShare,
+      memberIds,
+      shares,
+      unitShares: unit?.share_count ?? 0,
+      unitCovered: unit?.amount ?? 0,
+    };
     if (group.kind === "travel") {
       summary.reimbursementPerDriver = travelReimbursement(trip, group);
       summary.driverIds = travelDrivers
@@ -205,5 +235,8 @@ export function computePaysheet(input: EngineInput, summaries: GroupSummary[]): 
   const totalReimbursed = round2(
     expenses.filter((e) => e.reimbursed_at != null).reduce((s, e) => s + e.amount, 0),
   );
-  return { rows, totalExpenses, totalPrepaid, totalReimbursed };
+  // Hosted guests' shares, charged to no adult. This is why sum(owed) can come
+  // in under totalExpenses without anything being mis-split: the troop pays it.
+  const totalUnitCovered = round2(summaries.reduce((s, g) => s + g.unitCovered, 0));
+  return { rows, totalExpenses, totalPrepaid, totalReimbursed, totalUnitCovered };
 }

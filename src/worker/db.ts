@@ -16,6 +16,13 @@ import { HOME_ADDRESS } from "../shared/constants.ts";
 /** Raw trip row: roster_units arrives as a JSON string from D1. */
 type TripRow = Omit<Trip, "roster_units"> & { roster_units: string };
 
+/** Raw person row: SQLite has no boolean, so unit_paid comes back as 0/1. */
+type PersonRow = Omit<Person, "unit_paid"> & { unit_paid: number };
+
+export function normalizePerson(row: PersonRow): Person {
+  return { ...row, unit_paid: !!row.unit_paid };
+}
+
 export function normalizeTrip(row: TripRow): Trip {
   let units: string[] = [];
   try {
@@ -53,7 +60,7 @@ export async function loadEngineInput(db: D1Database, tripId: number): Promise<E
 
   return {
     trip,
-    people: people.results as Person[],
+    people: (people.results as PersonRow[]).map(normalizePerson),
     groups: groups.results as CostGroup[],
     expenses: expenses.results as Expense[],
     prepayments: prepayments.results as Prepayment[],

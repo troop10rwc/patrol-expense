@@ -44,6 +44,7 @@ export interface BundleDiff {
     totalExpenses: FieldChange | null;
     totalPrepaid: FieldChange | null;
     totalReimbursed: FieldChange | null;
+    totalUnitCovered: FieldChange | null;
   };
 }
 
@@ -144,6 +145,10 @@ function diffPaysheet(prev: TripBundle["paysheet"], curr: TripBundle["paysheet"]
     totalReimbursed: numChanged(prev.totalReimbursed, curr.totalReimbursed)
       ? { field: "totalReimbursed", from: prev.totalReimbursed ?? 0, to: curr.totalReimbursed }
       : null,
+    // Snapshots taken before hosted guests existed have no such total.
+    totalUnitCovered: numChanged(prev.totalUnitCovered, curr.totalUnitCovered)
+      ? { field: "totalUnitCovered", from: prev.totalUnitCovered ?? 0, to: curr.totalUnitCovered }
+      : null,
   };
 }
 
@@ -164,7 +169,8 @@ export function diffBundles(prev: TripBundle, curr: TripBundle): BundleDiff {
     paysheet.rows.length > 0 ||
     paysheet.totalExpenses != null ||
     paysheet.totalPrepaid != null ||
-    paysheet.totalReimbursed != null;
+    paysheet.totalReimbursed != null ||
+    paysheet.totalUnitCovered != null;
 
   return { hasChanges, expenses, prepayments, people, paysheet };
 }

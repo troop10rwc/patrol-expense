@@ -1110,9 +1110,11 @@ function buildPool(
       email: p.email,
       sub:
         p.source === "local"
-          ? p.type === "scout"
-            ? `guest · ${p.parent_id ? personById.get(p.parent_id)?.name ?? "" : "no parent"}`
-            : "guest"
+          ? p.unit_paid
+            ? "guest · unit pays"
+            : p.type === "scout"
+              ? `guest · ${p.parent_id ? personById.get(p.parent_id)?.name ?? "" : "no parent"}`
+              : "guest"
           : p.type === "scout"
             ? p.parent_id ? personById.get(p.parent_id)?.name ?? "" : ""
             : "adult",
@@ -1153,6 +1155,91 @@ function useMaps(bundle: TripBundle) {
 // Per-person changes since the latest snapshot: person_id -> { added, field->change }.
 interface RowChange { added: boolean; fields: Map<string, FieldChange> }
 
+/** One cost group's contribution to an adult's "owed", and who it paid for. */
+interface ShareLine {
+  group: CostGroup;
+  groupTotal: number;
+  totalShares: number;
+  perShare: number;
+  shareCount: number;
+  subtotal: number;
+  covers: Person[]; // the adult themselves + the youth billed to them
+}
+
+/**
+ * Break an adult's `owed` back down into the groups that produced it. Mirrors
+ * buildNotice() in the worker so the table and the emailed notice tell the same
+ * story; `covers` skips guests the unit is hosting, whose share went to the
+ * troop rather than to this adult, so the names always account for exactly
+ * `shareCount`.
+ */
+function shareLinesFor(bundle: TripBundle, personId: number, personById: Map<number, Person>): ShareLine[] {
+  const lines: ShareLine[] = [];
+  for (const s of bundle.groupSummaries) {
+    const mine = s.shares.find((sh) => sh.person_id === personId);
+    if (!mine || mine.share_count === 0) continue;
+    const covers = s.memberIds
+      .map((id) => personById.get(id))
+      .filter((p): p is Person =>
+        !!p && !p.unit_paid && (p.id === personId || p.parent_id === personId))
+      .sort((a, b) => (a.id === personId ? -1 : b.id === personId ? 1 : a.name.localeCompare(b.name)));
+    lines.push({
+      group: s.group,
+      groupTotal: s.total,
+      totalShares: s.totalShares,
+      perShare: s.perShare,
+      shareCount: mine.share_count,
+      // Snapshots predating allocated amounts fall back to the per-share multiply.
+      subtotal: mine.amount ?? round2(mine.share_count * s.perShare),
+      covers,
+    });
+  }
+  return lines.sort((a, b) => b.subtotal - a.subtotal);
+}
+
+/** The expanded row under a selected adult: what makes up their "owed". */
+function ShareBreakdown({ bundle, row, personById }: { bundle: TripBundle; row: PaysheetRow; personById: Map<number, Person> }) {
+  const lines = useMemo(
+    () => shareLinesFor(bundle, row.person_id, personById),
+    [bundle, row.person_id, personById],
+  );
+
+  if (lines.length === 0) {
+    return <p className="hint" style={{ margin: 0 }}>{row.name} isn't down as attending any cost group, so there's no share to explain.</p>;
+  }
+  return (
+    <>
+      <p className="hint" style={{ margin: "0 0 6px" }}>
+        Each group's cost is split evenly across everyone in it. {row.name} covers their own share
+        plus any youth billed to them.
+      </p>
+      {lines.map((l) => (
+        <div className="share-line" key={l.group.id}>
+          <div className="share-head">
+            <strong>{l.group.name}</strong>
+            <span className="num">{money(l.subtotal)}</span>
+          </div>
+          <div className="hint">
+            {money(l.groupTotal)} split {l.totalShares} ways = {money(l.perShare)} each ×{" "}
+            {l.shareCount} share{l.shareCount === 1 ? "" : "s"}:{" "}
+            {l.covers.map((p) => (
+              <span key={p.id} className="share-who">
+                {p.name}{p.type === "scout" && <span className="hint"> (youth)</span>}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="share-line share-sum">
+        <div className="share-head">
+          <strong>Total owed</strong>
+          <span className="num">{money(row.owed)}</span>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function Reimbursement({ bundle, run, busy }: TabProps) {
   const tripId = bundle.trip.id;
   const [showAll, setShowAll] = useState(false);
@@ -1161,6 +1248,10 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
   const [notices, setNotices] = useState<NoticeLink[]>([]);
   const [corrections, setCorrections] = useState<Correction[]>([]);
   const [noticeFor, setNoticeFor] = useState<PaysheetRow | null>(null);
+  // The adult whose share breakdown is open, if any. One at a time: the point
+  // is to explain a single "owed", not to turn the table into a wall of detail.
+  const [openShares, setOpenShares] = useState<number | null>(null);
+  const { personById } = useMaps(bundle);
 
   // Refresh the diff + snapshot list (call after taking/deleting a snapshot).
   const reload = useCallback(async () => {
@@ -1241,6 +1332,12 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
           <div className="k">Receipts paid back</div>
           <div className="v">{money(bundle.paysheet.totalReimbursed ?? 0)}</div>
         </div>
+        {(bundle.paysheet.totalUnitCovered ?? 0) > 0.005 && (
+          <div>
+            <div className="k">Covered by the unit</div>
+            <div className="v">{money(bundle.paysheet.totalUnitCovered)}</div>
+          </div>
+        )}
         <div><div className="k">Owed to people</div><div className="v pos">{money(owedToPeople)}</div></div>
         <div><div className="k">Owed by people</div><div className="v neg">{money(owedByPeople)}</div></div>
       </div>
@@ -1277,14 +1374,29 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
             // Call out cells whose value moved since the last snapshot: keep the
             // highlight, and show the explicit before → after underneath.
             const rc = changeByPerson.get(r.person_id);
+            const open = openShares === r.person_id;
             const cls = (f: string, base = "num") => rc?.fields.has(f) ? `${base} changed` : base;
             const note = (f: string) => {
               const c = rc?.fields.get(f);
               return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
             };
             return (
-              <tr key={r.person_id} className={`${!r.paid && !r.owed && !r.prepay && !r.reimbursed ? "zero" : ""}${rc?.added ? " row-added" : ""}`}>
-                <td>{r.name} {r.code && <span className="hint">({r.code})</span>}{rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}</td>
+              <Fragment key={r.person_id}>
+              <tr className={`${!r.paid && !r.owed && !r.prepay && !r.reimbursed ? "zero" : ""}${rc?.added ? " row-added" : ""}${open ? " row-open" : ""}`}>
+                <td>
+                  <button
+                    type="button"
+                    className="name-toggle"
+                    aria-expanded={open}
+                    title={`Show what makes up ${r.name}'s share`}
+                    onClick={() => setOpenShares(open ? null : r.person_id)}
+                  >
+                    <span className="caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+                    {r.name}
+                  </button>
+                  {r.code && <span className="hint"> ({r.code})</span>}
+                  {rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}
+                </td>
                 <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
                 <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
                 <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
@@ -1338,6 +1450,14 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
                   )}
                 </td>
               </tr>
+              {open && (
+                <tr className="share-detail">
+                  <td colSpan={8}>
+                    <ShareBreakdown bundle={bundle} row={r} personById={personById} />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             );
           })}
           {rows.length === 0 && (
@@ -1826,7 +1946,7 @@ function Corrections({
 // ------------------------------------------------------------------ Snapshots
 const MONEY_FIELDS = new Set([
   "amount", "paid", "owed", "prepay", "reimbursed", "balance", "outstanding",
-  "totalExpenses", "totalPrepaid", "totalReimbursed",
+  "totalExpenses", "totalPrepaid", "totalReimbursed", "totalUnitCovered",
 ]);
 function fmtVal(field: string, v: unknown): string {
   if (typeof v === "number" && MONEY_FIELDS.has(field)) return money(v);
@@ -1836,10 +1956,17 @@ function fmtVal(field: string, v: unknown): string {
   return String(v);
 }
 // Field names a reader shouldn't have to decode. Anything absent reads fine
-// as-is ("paid", "owed", "prepay"…).
+// as-is ("paid", "owed", "prepay"…). fmtChange prefixes every line with the
+// label, so callers must not add one of their own — the whole-trip totals below
+// are rendered as standalone lines and carry sentence case for that reason,
+// while the per-row fields stay lowercase mid-sentence after a person's name.
 const FIELD_LABELS: Record<string, string> = {
   reimbursed_at: "reimbursement",
   reimbursed: "paid back",
+  totalExpenses: "Total expenses",
+  totalPrepaid: "Pre-reimbursed total",
+  totalReimbursed: "Receipts paid back",
+  totalUnitCovered: "Covered by the unit",
 };
 function fmtChange(ch: FieldChange): string {
   return `${FIELD_LABELS[ch.field] ?? ch.field}: ${fmtVal(ch.field, ch.from)} → ${fmtVal(ch.field, ch.to)}`;
@@ -1866,6 +1993,11 @@ function accounting(n: number): string {
 // CSV of a snapshot's reimbursement summary (its frozen paysheet). Money is
 // written as raw signed numbers (spreadsheet-friendly). When a previous snapshot
 // is supplied, a "Net change vs prev" column gives each person's net movement.
+//
+// Guests the unit hosted are charged to no adult, so a purely per-person export
+// would drop them and "Owes (share)" would silently come in under the trip
+// total. The unit gets its own trailing line instead — it owes that money into
+// the pot exactly the way a family does, so both columns still foot.
 function buildSummaryCsv(b: TripBundle, prev?: TripBundle | null): string {
   const prevNet = prev ? netFromBundle(prev) : null;
   const header = ["Adult", "Code", "Paid", "Owes (share)", "Pre-reimbursed", "Reimbursed", "Net"];
@@ -1884,6 +2016,21 @@ function buildSummaryCsv(b: TripBundle, prev?: TripBundle | null): string {
       cells.push(pv != null ? round2(r.outstanding - pv) : "");
     }
     cells.push(r.status);
+    rows.push(cells);
+  }
+
+  const unitCovered = round2(b.paysheet.totalUnitCovered ?? 0);
+  if (Math.abs(unitCovered) > 0.005) {
+    const cells: unknown[] = [
+      "The unit (hosted guests)", "", 0, unitCovered, 0, 0, round2(-unitCovered),
+    ];
+    if (prevNet) {
+      // The unit's net is -unitCovered, so its movement is last snapshot's
+      // covered total minus this one's.
+      const prevCovered = round2(prev?.paysheet.totalUnitCovered ?? 0);
+      cells.push(round2(prevCovered - unitCovered));
+    }
+    cells.push(""); // the unit never settles up — it *is* the pot
     rows.push(cells);
   }
   return rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
@@ -1960,9 +2107,10 @@ function DiffList({ diff, nameOf, netOf, mode = "full" }: { diff: BundleDiff; na
           }
           return <li key={`ps${r.person_id}`}>{r.name}: {r.changes.map(fmtChange).join(", ")}{settleAmt(r, st)}</li>;
         })}
-      {diff.paysheet.totalExpenses && <li>Total expenses: {fmtChange(diff.paysheet.totalExpenses)}</li>}
-      {diff.paysheet.totalPrepaid && <li>Pre-reimbursed total: {fmtChange(diff.paysheet.totalPrepaid)}</li>}
-      {diff.paysheet.totalReimbursed && <li>Receipts paid back: {fmtChange(diff.paysheet.totalReimbursed)}</li>}
+      {diff.paysheet.totalExpenses && <li>{fmtChange(diff.paysheet.totalExpenses)}</li>}
+      {diff.paysheet.totalPrepaid && <li>{fmtChange(diff.paysheet.totalPrepaid)}</li>}
+      {diff.paysheet.totalReimbursed && <li>{fmtChange(diff.paysheet.totalReimbursed)}</li>}
+      {diff.paysheet.totalUnitCovered && <li>{fmtChange(diff.paysheet.totalUnitCovered)}</li>}
     </ul>
   );
 }
@@ -2754,8 +2902,8 @@ function Patrols({ bundle, roster, run, busy }: TabProps) {
         A group's expenses are split by shares, derived from who attended. Add adults and
         youth via the autocomplete — or paste a list of names/emails to bulk-add. Each
         attendee is one share, billed to the responsible adult (a youth → their parent;
-        an adult → themselves). Click a group's name to rename it — expenses and
-        attendance stay put.
+        an adult → themselves) — or to the unit, for a guest the troop is hosting. Click a
+        group's name to rename it — expenses and attendance stay put.
       </small></p>
 
       <div className="row" style={{ marginBottom: 8 }}>
@@ -2941,19 +3089,26 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
   const memberIds = summary.memberIds;
   const pool = useMemo(() => buildPool(bundle, roster, "all"), [bundle, roster]);
 
-  // For each billable adult, the contributors (themselves + their attending youth).
-  const shareBreakdown = useMemo(() => {
+  // For each billable adult, the contributors (themselves + their attending
+  // youth). Guests the unit is hosting are pooled separately: they still hold
+  // shares, they're just charged to the troop. Mirrors deriveShares() in the
+  // engine — keep the two in step or the listed shares stop adding up.
+  const { shareBreakdown, unitContributors } = useMemo(() => {
     const m = new Map<number, Person[]>();
+    const unit: Person[] = [];
     for (const pid of memberIds) {
       const p = personById.get(pid);
       if (!p) continue;
+      if (p.unit_paid) { unit.push(p); continue; }
       const aid = p.type === "adult" ? p.id : p.parent_id;
       if (aid == null) continue;
+      const adult = personById.get(aid);
+      if (adult?.unit_paid) { unit.push(p); continue; }
       const list = m.get(aid) ?? [];
       list.push(p);
       m.set(aid, list);
     }
-    return [...m.entries()]
+    const rows = [...m.entries()]
       .map(([aid, contribs]) => ({
         adult: personById.get(aid)!,
         contributors: contribs.sort(
@@ -2964,11 +3119,16 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
       }))
       .filter((r) => !!r.adult)
       .sort((a, b) => b.contributors.length - a.contributors.length);
+    return {
+      shareBreakdown: rows,
+      unitContributors: unit.sort((a, b) => a.name.localeCompare(b.name)),
+    };
   }, [memberIds, personById]);
 
   const orphaned = memberIds.some((id) => {
     const p = personById.get(id);
-    return p && p.type === "scout" && (p.parent_id == null || personById.get(p.parent_id)?.type !== "adult");
+    if (!p || p.unit_paid) return false; // hosted by the troop, on purpose
+    return p.type === "scout" && (p.parent_id == null || personById.get(p.parent_id)?.type !== "adult");
   });
 
   return (
@@ -2998,10 +3158,27 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
           <small className="neg">A listed youth has no responsible adult and won't be billed. Assign a parent in the Roster tab.</small>
         </p>
       )}
-      {shareBreakdown.length > 0 && (
+      {(shareBreakdown.length > 0 || unitContributors.length > 0) && (
         <p style={{ margin: "6px 0 0" }}>
           <small className="hint">
             → {summary.totalShares} shares:{" "}
+            {unitContributors.length > 0 && (
+              <>
+                <span className="tip" tabIndex={0}>
+                  the unit {unitContributors.length}
+                  <span className="tip-body" role="tooltip">
+                    {unitContributors.map((c) => (
+                      <span key={c.id} className="tip-row">
+                        <span>{c.name}</span>
+                        <span className="tip-x">×1</span>
+                      </span>
+                    ))}
+                  </span>
+                </span>
+                {summary.unitCovered > 0 && <> ({money(summary.unitCovered)})</>}
+                {shareBreakdown.length > 0 && ", "}
+              </>
+            )}
             {shareBreakdown.map((s, i) => (
               <span key={s.adult.id}>
                 {i > 0 && ", "}
@@ -3152,7 +3329,6 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
 // The registered roster is read from roster-db (read-only). Only unregistered
 // additions (guests) are stored locally and can be added/removed here.
 function Roster({ bundle, roster, run, busy }: TabProps) {
-  const { personById } = useMaps(bundle);
   const adultPool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
 
   const regAdults = roster.filter((m) => m.type === "adult");
@@ -3164,6 +3340,9 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
   const [name, setName] = useState("");
   const [type, setType] = useState("scout");
   const [parentRef, setParentRef] = useState<string>("");
+  // "The troop is hosting this one": their share is still counted, but it's
+  // charged to the unit instead of to a family. See migration 0008.
+  const [unitPaid, setUnitPaid] = useState(false);
 
   const effectiveParent = parentRef || adultPool[0]?.ref || "";
 
@@ -3173,10 +3352,13 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
       api.addPerson(bundle.trip.id, {
         name: name.trim(),
         type,
-        parent_ref: type === "scout" ? effectiveParent : undefined,
+        parent_ref: type === "scout" && !unitPaid ? effectiveParent : undefined,
+        unit_paid: unitPaid,
       }),
-    ).then(() => { setName(""); });
+    ).then(() => { setName(""); setUnitPaid(false); });
   }
+
+  const unitCovered = bundle.paysheet.totalUnitCovered ?? 0;
 
   return (
     <div className="card">
@@ -3198,15 +3380,24 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
             <option value="adult">adult</option>
           </select>
         </label>
-        {type === "scout" && (
+        {type === "scout" && !unitPaid && (
           <label className="fld" style={{ minWidth: 180 }}>Billed to
             <select value={effectiveParent} onChange={(e) => setParentRef(e.target.value)}>
               {adultPool.map((p) => <option key={p.ref} value={p.ref}>{p.name}</option>)}
             </select>
           </label>
         )}
+        <label className="row" style={{ alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 8 }}>
+          <input type="checkbox" checked={unitPaid} onChange={(e) => setUnitPaid(e.target.checked)} />
+          <span>Paid by the unit</span>
+        </label>
         <button className="btn" disabled={busy || !name.trim()} onClick={add}>Add guest</button>
       </div>
+      <p style={{ margin: "-8px 0 16px" }}><small className="hint">
+        <strong>Paid by the unit</strong> hosts the guest: they still count as a share wherever they
+        attend, so nobody else's per-share moves — the troop picks up their cut instead of a family.
+        {unitCovered > 0 && <> This trip's guests cost the unit <strong>{money(unitCovered)}</strong> so far.</>}
+      </small></p>
 
       {guests.length > 0 && (
         <table style={{ marginBottom: 18 }}>
@@ -3216,9 +3407,39 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
           <tbody>
             {guests.map((p) => (
               <tr key={p.id}>
-                <td>{p.name} <span className="pill">guest</span></td>
+                <td>
+                  {p.name} <span className="pill">guest</span>
+                  {p.unit_paid && <> <span className="pill">unit pays</span></>}
+                </td>
                 <td className="hint">{p.type === "scout" ? "youth" : "adult"}</td>
-                <td className="hint">{p.parent_id ? personById.get(p.parent_id)?.name ?? "—" : "—"}</td>
+                <td>
+                  <select
+                    aria-label={`Who is billed for ${p.name}`}
+                    disabled={busy}
+                    value={p.unit_paid ? "unit" : p.type === "adult" ? "self" : p.parent_id ? `id:${p.parent_id}` : ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      run(() =>
+                        api.updatePerson(
+                          p.id,
+                          v === "unit"
+                            ? { unit_paid: true }
+                            : v === "self"
+                              ? { unit_paid: false }
+                              : { unit_paid: false, parent_ref: v },
+                        ),
+                      );
+                    }}
+                  >
+                    <option value="unit">The unit (troop pays)</option>
+                    {p.type === "adult"
+                      ? <option value="self">{p.name} (themselves)</option>
+                      : adultPool.map((a) => <option key={a.ref} value={a.ref}>{a.name}</option>)}
+                    {p.type === "scout" && !p.unit_paid && p.parent_id == null && (
+                      <option value="">— no responsible adult —</option>
+                    )}
+                  </select>
+                </td>
                 <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
               </tr>
             ))}
