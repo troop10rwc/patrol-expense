@@ -220,31 +220,44 @@ export async function ensureLocalPerson(
  *
  * Returns null for a blank name — the caller stores that as "no responsible
  * adult", which the UI already flags on the attendance list.
+ *
+ * `email` is what the notice mailer needs to reach them; without one their
+ * paysheet row can only be read off the screen (sending 422s with "no email
+ * address on file"). It's applied on creation, and to a match only when that
+ * person has none — a roster member's own address is the better one and must
+ * not be overwritten by something hand-typed here.
  */
 export async function ensureNamedAdult(
   db: D1Database,
   tripId: number,
   rawName: string,
+  email?: string | null,
 ): Promise<number | null> {
   const name = rawName.trim().replace(/\s+/g, " ");
   if (!name) return null;
+  const mail = email?.trim() || null;
 
   const existing = await db
     .prepare(
-      `SELECT id FROM people
+      `SELECT id, email FROM people
         WHERE trip_id = ? AND type = 'adult'
           AND lower(replace(replace(trim(name), '  ', ' '), '  ', ' ')) = lower(?)
         ORDER BY id LIMIT 1`,
     )
     .bind(tripId, name)
-    .first<{ id: number }>();
-  if (existing) return existing.id;
+    .first<{ id: number; email: string | null }>();
+  if (existing) {
+    if (mail && !existing.email?.trim()) {
+      await db.prepare("UPDATE people SET email = ? WHERE id = ?").bind(mail, existing.id).run();
+    }
+    return existing.id;
+  }
 
   const inserted = await db
     .prepare(
-      "INSERT INTO people (trip_id, name, type, source) VALUES (?, ?, 'adult', 'local') RETURNING id",
+      "INSERT INTO people (trip_id, name, email, type, source) VALUES (?, ?, ?, 'adult', 'local') RETURNING id",
     )
-    .bind(tripId, name)
+    .bind(tripId, name, mail)
     .first<{ id: number }>();
   if (!inserted) throw new Error(`failed to create billed-to adult "${name}"`);
   return inserted.id;

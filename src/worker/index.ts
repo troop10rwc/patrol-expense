@@ -241,7 +241,7 @@ api.delete("/trips/:id", async (c) => {
 // the common case of a guest whose responsible adult isn't in roster-db at all.
 api.post("/trips/:id/people", async (c) => {
   const tripId = Number(c.req.param("id"));
-  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number; parent_ref?: string; parent_name?: string; unit_paid?: boolean }>();
+  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean }>();
   if (!b.name || !b.type) return c.json(bad("name and type are required"), 400);
   // A guest the unit hosts is billed to nobody, so a responsible adult would
   // never be read — don't record one and leave a stale "billed to" behind.
@@ -251,7 +251,7 @@ api.post("/trips/:id/people", async (c) => {
     : b.parent_ref
       ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.parent_ref)
       : b.parent_name != null
-        ? await ensureNamedAdult(c.env.DB, tripId, b.parent_name)
+        ? await ensureNamedAdult(c.env.DB, tripId, b.parent_name, b.parent_email)
         : b.parent_id ?? null;
   await c.env.DB.prepare(
     "INSERT INTO people (trip_id, name, code, email, type, parent_id, source, unit_paid) VALUES (?, ?, ?, ?, ?, ?, 'local', ?)",
@@ -266,7 +266,7 @@ api.post("/trips/:id/people", async (c) => {
 // apart by value — only by whether the caller sent the key at all.
 api.patch("/people/:pid", async (c) => {
   const pid = Number(c.req.param("pid"));
-  const b = await c.req.json<{ name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; unit_paid?: boolean }>();
+  const b = await c.req.json<{ name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean }>();
   const row = await c.env.DB.prepare("SELECT trip_id FROM people WHERE id = ?").bind(pid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("person not found"), 404);
   // Same "id:"/"bsa:" ref the POST takes, so a roster adult can be named as the
@@ -277,7 +277,7 @@ api.patch("/people/:pid", async (c) => {
   // Free-text billed-to. Resolved before the SET list is built so a name that
   // clears to blank writes NULL rather than being skipped as "not sent".
   const namedParent = b.parent_name != null
-    ? await ensureNamedAdult(c.env.DB, row.trip_id, b.parent_name)
+    ? await ensureNamedAdult(c.env.DB, row.trip_id, b.parent_name, b.parent_email)
     : null;
 
   const sets: string[] = [];

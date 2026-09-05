@@ -83,12 +83,12 @@ export const api = {
 
   addPerson: (
     tripId: number,
-    body: { name: string; code?: string; email?: string; type: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; unit_paid?: boolean },
+    body: { name: string; code?: string; email?: string; type: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean },
   ) => req<TripBundle>(`/api/trips/${tripId}/people`, { method: "POST", body: JSON.stringify(body) }),
   // Partial by key presence — send only the fields you mean to change.
   updatePerson: (
     pid: number,
-    body: { name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; unit_paid?: boolean },
+    body: { name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean },
   ) => req<TripBundle>(`/api/people/${pid}`, { method: "PATCH", body: JSON.stringify(body) }),
   deletePerson: (pid: number) => req<TripBundle>(`/api/people/${pid}`, { method: "DELETE" }),
 

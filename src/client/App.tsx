@@ -3027,6 +3027,50 @@ function AdultNameField({
 }
 
 /**
+ * Inline text field that saves on blur or Enter and reverts on Escape, for
+ * editing one value in place inside a table row.
+ */
+function InlineText({
+  value, onSave, busy, ariaLabel, placeholder, type,
+}: {
+  value: string;
+  onSave: (next: string) => void;
+  busy: boolean;
+  ariaLabel: string;
+  placeholder?: string;
+  type?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const cancelled = useRef(false);
+  useEffect(() => setDraft(value), [value]);
+
+  return (
+    <input
+      type={type ?? "text"}
+      value={draft}
+      disabled={busy}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      autoComplete="off"
+      autoCorrect="off"
+      autoCapitalize="off"
+      spellCheck={false}
+      data-1p-ignore
+      data-lpignore="true"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (cancelled.current) { cancelled.current = false; setDraft(value); return; }
+        if (draft.trim() !== value.trim()) onSave(draft.trim());
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); }
+        if (e.key === "Escape") { cancelled.current = true; e.currentTarget.blur(); }
+      }}
+    />
+  );
+}
+
+/**
  * The "Billed to" cell for one guest: edit in place, saving on blur or Enter
  * and reverting on Escape. A name matching an adult already on the trip is
  * saved as that person; anything else is sent as free text for the server to
@@ -3470,26 +3514,44 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
   const [type, setType] = useState("scout");
   // Free text: the responsible adult is often someone outside the roster.
   const [billedTo, setBilledTo] = useState("");
+  const [email, setEmail] = useState("");
   // "The troop is hosting this one": their share is still counted, but it's
   // charged to the unit instead of to a family. See migration 0008.
   const [unitPaid, setUnitPaid] = useState(false);
 
+  const typedParent = billedTo.trim();
+  const parentHit = matchPick(typedParent, adultPool);
+  // Who this guest's cost will actually be billed to, and whether we already
+  // know how to reach them. Roster people arrive with an address; anyone we're
+  // about to invent does not, and a paysheet row we can't email is a row the
+  // treasurer has to chase by hand.
+  const needsEmail = unitPaid
+    ? false
+    : type === "adult"
+      ? true // a guest adult is billed to themselves, and is never from roster-db
+      : !!typedParent && !parentHit;
+
   function add() {
     if (!name.trim()) return;
-    const typed = billedTo.trim();
-    const hit = matchPick(typed, adultPool);
+    const mail = email.trim() || undefined;
     run(() =>
       api.addPerson(bundle.trip.id, {
         name: name.trim(),
         type,
+        // The guest's own address only means anything when they're the one
+        // being billed; a youth's notices go to their responsible adult.
+        ...(needsEmail && type === "adult" ? { email: mail } : {}),
         // An exact match bills to that existing person (keeping their roster
-        // identity); anything else is created as a local adult by that name.
-        ...(type === "scout" && !unitPaid && typed
-          ? hit ? { parent_ref: hit.ref } : { parent_name: typed }
+        // identity); anything else is created as a local adult by that name,
+        // carrying the address typed alongside it.
+        ...(type === "scout" && !unitPaid && typedParent
+          ? parentHit
+            ? { parent_ref: parentHit.ref }
+            : { parent_name: typedParent, parent_email: mail }
           : {}),
         unit_paid: unitPaid,
       }),
-    ).then(() => { setName(""); setBilledTo(""); setUnitPaid(false); });
+    ).then(() => { setName(""); setBilledTo(""); setEmail(""); setUnitPaid(false); });
   }
 
   const unitCovered = bundle.paysheet.totalUnitCovered ?? 0;
@@ -3526,6 +3588,17 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
             />
           </label>
         )}
+        {needsEmail && (
+          <label className="fld" style={{ minWidth: 200 }}>
+            {type === "adult" ? "Email" : `Email for ${typedParent}`}
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="optional — to email them a notice"
+            />
+          </label>
+        )}
         <label className="row" style={{ alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 8 }}>
           <input type="checkbox" checked={unitPaid} onChange={(e) => setUnitPaid(e.target.checked)} />
           <span>Paid by the unit</span>
@@ -3535,7 +3608,8 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
       <p style={{ margin: "-8px 0 16px" }}><small className="hint">
         <strong>Billed to</strong> takes any name — a visiting cub's parent usually isn't in
         roster-db. Typing someone already on the trip bills to them; a new name is added as a
-        local adult, who then shows up on the Reimbursement tab owing that share.{" "}
+        local adult, who then shows up on the Reimbursement tab owing that share — give them an
+        email there and their notice can be sent from the app instead of chased by hand.{" "}
         <strong>Paid by the unit</strong> instead hosts the guest: they still count as a share
         wherever they attend, so nobody else's per-share moves — the troop picks up their cut.
         {unitCovered > 0 && <> This trip's guests cost the unit <strong>{money(unitCovered)}</strong> so far.</>}
@@ -3544,7 +3618,7 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
       {guests.length > 0 && (
         <table style={{ marginBottom: 18 }}>
           <thead>
-            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th className="unit-col">Unit pays</th><th></th></tr>
+            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th>Email</th><th className="unit-col">Unit pays</th><th></th></tr>
           </thead>
           <tbody>
             {guests.map((p) => (
@@ -3566,6 +3640,23 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
                       run={run}
                       busy={busy}
                     />
+                  )}
+                </td>
+                {/* Only whoever is billed needs an address: a youth's notice
+                    goes to their responsible adult, who has their own row here
+                    (or a roster entry that already carries one). */}
+                <td>
+                  {p.type === "adult" && !p.unit_paid ? (
+                    <InlineText
+                      value={p.email ?? ""}
+                      busy={busy}
+                      type="email"
+                      ariaLabel={`Email for ${p.name}`}
+                      placeholder="none on file"
+                      onSave={(next) => run(() => api.updatePerson(p.id, { email: next || null }))}
+                    />
+                  ) : (
+                    <span className="hint">—</span>
                   )}
                 </td>
                 <td className="unit-col">
