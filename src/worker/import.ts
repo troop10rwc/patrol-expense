@@ -248,6 +248,20 @@ export function buildPreview(
         flags.push({ kind: "payer_unknown", severity: "blocking", groupName: g.name,
           message: `${g.name}: receipt "${r.description}" (${money(r.amount)}) has no payer — choose one before importing.` });
 
+  // So does a payer that resolved to a youth: only adults get a paysheet row, so
+  // a receipt fronted by a scout would count toward the trip total and land in
+  // nobody's balance. A sheet naming a scout in a "paid by" cell usually means
+  // the family's adult was meant. Guests always resolve as adults, so this only
+  // ever fires on a real roster match — where `type` came from roster-db.
+  const personByRef = new Map(reg.list().map((p) => [p.ref, p]));
+  for (const g of expenseGroups)
+    for (const r of g.receipts) {
+      const payer = r.payerRef ? personByRef.get(r.payerRef) : undefined;
+      if (payer?.type === "scout")
+        flags.push({ kind: "payer_not_adult", severity: "blocking", groupName: g.name, personRef: payer.ref,
+          message: `${g.name}: receipt "${r.description}" (${money(r.amount)}) is paid by ${payer.displayName}, a youth — pick the responsible adult before importing.` });
+    }
+
   // People-resolution flags.
   const people = reg.list();
   for (const p of people) {
