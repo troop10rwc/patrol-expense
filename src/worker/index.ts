@@ -80,6 +80,47 @@ api.get("/me/statement", async (c) => {
 const bad = (msg: string) => ({ error: msg });
 
 /**
+ * Money can only be attributed to an adult. `computePaysheet` builds one row per
+ * adult, so a receipt fronted by a youth would count toward the trip total while
+ * landing in nobody's balance — the Reimbursement tab would report money paid out
+ * that it can't attribute, and its "owed to − owed by" line would stop
+ * reconciling against what the unit covers. Travel drivers are the same rule at
+ * one remove: `regenerateTravelExpenses` makes each driver the payer of their own
+ * mileage receipt.
+ *
+ * The Expenses and Travel tabs only ever offer adults, but nothing underneath
+ * them enforced it: this endpoint takes a bare `payer_id`, and the importer
+ * resolves a payer from whatever a sheet's "paid by" cell happens to say.
+ *
+ * Returns an error message, or null when every id is an adult on this trip.
+ */
+async function rejectNonAdults(
+  db: D1Database,
+  tripId: number,
+  ids: number[],
+  role: "payer" | "driver",
+): Promise<string | null> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return null;
+  const rows = await db
+    .prepare(
+      `SELECT id, name, type FROM people WHERE trip_id = ? AND id IN (${unique.map(() => "?").join(",")})`,
+    )
+    .bind(tripId, ...unique)
+    .all<{ id: number; name: string; type: string }>();
+  const found = rows.results ?? [];
+  if (found.length !== unique.length) {
+    return role === "payer" ? "that payer isn't on this trip" : "that driver isn't on this trip";
+  }
+  const youth = found.filter((r) => r.type !== "adult").map((r) => r.name);
+  if (youth.length === 0) return null;
+  const who = `${youth.join(", ")} ${youth.length === 1 ? "is a youth" : "are youth"}`;
+  return role === "payer"
+    ? `${who} — a receipt has to be fronted by an adult.`
+    : `${who} — only an adult can be reimbursed for driving.`;
+}
+
+/**
  * Absolute URL of a shared statement, for pasting into an email.
  *
  * `reqUrl` is the inner request the entrypoint's `fetch` rewrote (BASE_PATH
@@ -382,6 +423,10 @@ api.put("/groups/:gid/drivers", async (c) => {
   const row = await c.env.DB.prepare("SELECT trip_id FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("group not found"), 404);
   const ids = await resolvePeople(c, row.trip_id, b);
+  // A driver is paid as the payer of their own mileage receipt, so the same
+  // adults-only rule applies here as to a hand-entered receipt.
+  const driverErr = await rejectNonAdults(c.env.DB, row.trip_id, ids, "driver");
+  if (driverErr) return c.json(bad(driverErr), 400);
   await c.env.DB.prepare("DELETE FROM travel_drivers WHERE group_id = ?").bind(gid).run();
   if (ids.length) {
     await c.env.DB.batch(
@@ -474,6 +519,9 @@ api.post("/trips/:id/expenses", async (c) => {
     amount = b.amount;
     payerId = b.payer_ref ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.payer_ref) : b.payer_id!;
   }
+
+  const payerErr = await rejectNonAdults(c.env.DB, tripId, [payerId], "payer");
+  if (payerErr) return c.json(bad(payerErr), 400);
 
   const ins = await c.env.DB.prepare(
     "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
@@ -573,6 +621,10 @@ api.patch("/expenses/:eid", async (c) => {
   const b = await c.req.json<{ group_id?: number; description?: string; amount?: number; payer_id?: number }>();
   const row = await c.env.DB.prepare("SELECT trip_id FROM expenses WHERE id = ?").bind(eid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("expense not found"), 404);
+  if (b.payer_id != null) {
+    const payerErr = await rejectNonAdults(c.env.DB, row.trip_id, [b.payer_id], "payer");
+    if (payerErr) return c.json(bad(payerErr), 400);
+  }
   await c.env.DB.prepare(
     "UPDATE expenses SET group_id = COALESCE(?, group_id), description = COALESCE(?, description), amount = COALESCE(?, amount), payer_id = COALESCE(?, payer_id) WHERE id = ?",
   )
@@ -1017,6 +1069,17 @@ api.post("/import/commit", async (c) => {
     return c.json({ error: "choose a payer for every receipt before importing", receipts: noPayer }, 409);
   }
 
+  // Same shape of refusal for a youth payer. The preview is client-editable, so
+  // this is only the friendly early exit — the binding check runs below against
+  // the types actually written to the trip.
+  const youthRefs = new Set(preview.people.filter((p) => p.type === "scout").map((p) => p.ref));
+  const youthPayer = preview.expenseGroups.flatMap((g) =>
+    g.receipts.filter((r) => r.amount > 0 && r.payerRef && youthRefs.has(r.payerRef))
+      .map((r) => `${g.name}: ${r.description}`));
+  if (youthPayer.length) {
+    return c.json({ error: "a receipt has to be fronted by an adult — pick the responsible adult", receipts: youthPayer }, 409);
+  }
+
   const uuid = crypto.randomUUID();
   const name = preview.trip.name?.trim() || "Imported trip";
   const slug = slugify(name);
@@ -1061,6 +1124,10 @@ api.post("/import/commit", async (c) => {
         if (rc.amount <= 0) continue;
         const payer = personId.get(rc.payerRef!);
         if (payer == null) throw new Error(`payer for ${g.name}/${rc.description} not resolved`);
+        // Authoritative: a roster projection takes its type from roster-db, so
+        // this catches a payer the (client-editable) preview called an adult.
+        const payerErr = await rejectNonAdults(c.env.DB, tripId, [payer], "payer");
+        if (payerErr) throw new Error(`${g.name}/${rc.description}: ${payerErr}`);
         await c.env.DB.prepare(
           "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
         ).bind(tripId, gid, rc.description, rc.amount, payer).run();
@@ -1077,6 +1144,8 @@ api.post("/import/commit", async (c) => {
       ).bind(tripId, t.name, travelSort++, t.origin, t.destination, t.oneWayMiles, t.roundTripMiles, t.tolls, t.rateOverride, chargeTo).run();
       const gid = r.meta.last_row_id;
       const driverIds = [...new Set(t.driverRefs.map((ref) => personId.get(ref)).filter((x): x is number => x != null))];
+      const driverErr = await rejectNonAdults(c.env.DB, tripId, driverIds, "driver");
+      if (driverErr) throw new Error(`${t.name}: ${driverErr}`);
       if (driverIds.length) {
         await c.env.DB.batch(driverIds.map((pid) =>
           c.env.DB.prepare("INSERT INTO travel_drivers (group_id, person_id) VALUES (?, ?)").bind(gid, pid)));

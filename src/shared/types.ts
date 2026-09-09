@@ -195,7 +195,8 @@ export type ImportFlagKind =
   | "summary_mismatch" // Summary total != sum of the Summary's own line items
   | "unmatched_person" // no roster match -> will become a local guest
   | "ambiguous_person" // >1 roster member shares this last-4 BSA suffix
-  | "payer_unknown"; // a receipt row had no payer
+  | "payer_unknown" // a receipt row had no payer
+  | "payer_not_adult"; // a receipt row's payer resolved to a youth
 
 export type ImportFlagSeverity = "blocking" | "warning" | "info";
 
