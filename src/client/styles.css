@@ -368,6 +368,39 @@ tr.share-detail .share-line:last-of-type { border-bottom: none; }
 .stmt-hist-delta.neg { color: var(--t10-clay-deep); }
 .stmt-hist-row.projected { border-top: 1px dashed var(--t10-line-soft); margin-top: 4px; padding-top: 6px; }
 
+/* ---- The receipts worksheet: one table per cost group, one shared grid ----
+   Each cost group gets its own <table>, which under auto layout meant every
+   group sized its columns to its own rows — Amount landed in a different place
+   in each block. Fixed layout plus the colgroup below gives all of them the
+   same column widths, so the worksheet reads down the page as one set of
+   columns. Receipt is the only column without a width: it absorbs the slack. */
+table.receipts { table-layout: fixed; }
+/* These two carry `width: 1%` for the auto-layout tables elsewhere (shrink to
+   fit); under fixed layout the colgroup is the authority, so stand them down. */
+table.receipts th.check-col, table.receipts td.check-col,
+table.receipts th.reimb-col, table.receipts td.reimb-col { width: auto; }
+/* Percentages, not pixels: fixed pixel columns add up to more than a narrow
+   table and squeeze Receipt to nothing. These always sum to 100% — Receipt
+   Files gives up its slice to the checkbox column in edit mode. */
+table.receipts .c-receipt { width: 28%; }
+table.receipts .c-payer   { width: 17%; }
+table.receipts .c-amount  { width: 11%; }
+table.receipts .c-reimb   { width: 12%; }
+table.receipts .c-files   { width: 24%; }
+table.receipts .c-actions { width:  8%; }
+table.receipts .c-check   { width:  4%; }
+/* In edit mode the checkbox column's slice comes out of Files, not Receipt:
+   Files holds a button and a few chips that reflow happily, while Receipt holds
+   the description that has to stay on one line to keep rows the same height. */
+table.receipts.editing .c-files { width: 20%; }
+/* Fixed layout won't grow a cell for a long description or filename, so let
+   them break rather than spill into the next column. */
+table.receipts td { overflow-wrap: anywhere; }
+/* Below this the columns are too cramped to read; scroll the worksheet inside
+   its own box rather than letting the page scroll sideways. */
+table.receipts { min-width: 660px; }
+.table-scroll { overflow-x: auto; }
+
 /* ---- Expense attachments (receipts) ---- */
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .attachment {

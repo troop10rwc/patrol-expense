@@ -2604,7 +2604,21 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
         return (
           <div key={g.id}>
             <h3>{g.name} — {money(summary.total)}{summary.totalShares > 0 && <> · {money(summary.perShare)}/share ({summary.totalShares} shares)</>}</h3>
-            <table>
+            {/* Every cost group renders its own table, so auto layout sized each
+                one to its own contents and the columns stepped in and out down
+                the page. Fixed layout + a shared colgroup pins them to the same
+                grid, so Amount reads as one column across the whole worksheet. */}
+            <div className="table-scroll">
+            <table className={editing ? "receipts editing" : "receipts"}>
+              <colgroup>
+                {editing && <col className="c-check" />}
+                <col className="c-receipt" />
+                <col className="c-payer" />
+                <col className="c-amount" />
+                <col className="c-reimb" />
+                <col className="c-files" />
+                <col className="c-actions" />
+              </colgroup>
               <thead>
                 <tr>
                   {editing && (
@@ -2680,6 +2694,7 @@ function Expenses({ bundle, roster, run, busy }: TabProps) {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         );
       })}
