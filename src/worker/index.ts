@@ -401,7 +401,7 @@ api.delete("/groups/:gid", async (c) => {
   if (!row) return c.json(bad("group not found"), 404);
   // Read the patrol's roll before the cascade wipes it, so the unit list can
   // drop the people this patrol was the only reason for.
-  const wasOnPatrol = row.kind === "patrol" ? await groupMemberIds(c.env.DB, gid) : [];
+  const wasOnPatrol = row.kind === "patrol" ? [...(await groupMemberSources(c.env.DB, gid)).keys()] : [];
   await c.env.DB.prepare("DELETE FROM cost_groups WHERE id = ?").bind(gid).run();
   if (wasOnPatrol.length) await syncUnitFromPatrols(c.env.DB, row.trip_id, [], wasOnPatrol);
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
@@ -444,13 +444,14 @@ api.put("/groups/:gid/drivers", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
-// Everyone a cost group's membership lists, by person id.
-async function groupMemberIds(db: D1Database, gid: number): Promise<number[]> {
+// A cost group's membership, person id -> how it got there (see migration 0009:
+// 1 = mirrored in from a patrol, 0 = someone added them deliberately).
+async function groupMemberSources(db: D1Database, gid: number): Promise<Map<number, number>> {
   const rows = await db
-    .prepare("SELECT person_id FROM group_members WHERE group_id = ?")
+    .prepare("SELECT person_id, auto FROM group_members WHERE group_id = ?")
     .bind(gid)
-    .all<{ person_id: number }>();
-  return rows.results.map((r) => r.person_id);
+    .all<{ person_id: number; auto: number }>();
+  return new Map(rows.results.map((r) => [r.person_id, r.auto]));
 }
 
 // The trip's unit group — the cost center everything troop-wide is charged to.
@@ -467,14 +468,18 @@ async function unitGroupId(db: D1Database, tripId: number): Promise<number | nul
 
 /**
  * Being on a patrol means being on the trip, so patrol attendance is mirrored
- * onto the unit group's list: `added` are inserted there (idempotently), and
- * `removed` are dropped — but only the ones no remaining patrol still lists, so
- * a scout on two patrols keeps their unit seat. The client marks the mirrored
- * people with the patrol they came from.
+ * onto the unit group's list: `added` are inserted there as auto rows, and
+ * `removed` are swept off it. Three things survive the sweep:
  *
- * Provenance isn't stored, so a person hand-added to the unit list who was also
- * on the patrol being edited leaves the unit list with them. Anyone never on a
- * patrol is never touched.
+ *  - someone another patrol still lists (a scout on two patrols keeps their seat),
+ *  - someone added to the unit list deliberately (auto=0) — the mirror only ever
+ *    clears up after itself, and `INSERT OR IGNORE` leaves an existing row's
+ *    auto alone, so being mirrored later never downgrades a hand-added seat,
+ *  - anyone never on a patrol at all, who is never touched either way.
+ *
+ * The client badges everyone on the unit list who is also on a patrol with that
+ * patrol, whichever way their row got there: while they're on a patrol they're
+ * on the trip, so the unit list can't drop them.
  */
 async function syncUnitFromPatrols(
   db: D1Database,
@@ -487,13 +492,13 @@ async function syncUnitFromPatrols(
   const stmts = [
     ...added.map((pid) =>
       db
-        .prepare("INSERT OR IGNORE INTO group_members (group_id, person_id) VALUES (?, ?)")
+        .prepare("INSERT OR IGNORE INTO group_members (group_id, person_id, auto) VALUES (?, ?, 1)")
         .bind(unitId, pid),
     ),
     ...removed.map((pid) =>
       db
         .prepare(
-          `DELETE FROM group_members WHERE group_id = ? AND person_id = ?
+          `DELETE FROM group_members WHERE group_id = ? AND person_id = ? AND auto = 1
              AND NOT EXISTS (
                SELECT 1 FROM group_members gm
                  JOIN cost_groups g ON g.id = gm.group_id
@@ -505,6 +510,20 @@ async function syncUnitFromPatrols(
   if (stmts.length) await db.batch(stmts);
 }
 
+// Everyone the trip's patrols list between them — the people the unit group has
+// to carry, whatever its own membership was just set to.
+async function patrolMemberIds(db: D1Database, tripId: number): Promise<number[]> {
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT gm.person_id FROM group_members gm
+         JOIN cost_groups g ON g.id = gm.group_id
+        WHERE g.trip_id = ? AND g.kind = 'patrol'`,
+    )
+    .bind(tripId)
+    .all<{ person_id: number }>();
+  return rows.results.map((r) => r.person_id);
+}
+
 // Replace a cost group's membership (adults + youth who attended). Shares are
 // derived from this. Editing a patrol also keeps the unit list in step — see
 // syncUnitFromPatrols.
@@ -514,20 +533,28 @@ api.put("/groups/:gid/members", async (c) => {
   const row = await c.env.DB.prepare("SELECT trip_id, kind FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number; kind: GroupKind }>();
   if (!row) return c.json(bad("group not found"), 404);
   const ids = await resolvePeople(c, row.trip_id, b);
-  const before = row.kind === "patrol" ? await groupMemberIds(c.env.DB, gid) : [];
+  const before = await groupMemberSources(c.env.DB, gid);
   await c.env.DB.prepare("DELETE FROM group_members WHERE group_id = ?").bind(gid).run();
   if (ids.length) {
     await c.env.DB.batch(
       ids.map((pid) =>
         c.env.DB
-          .prepare("INSERT INTO group_members (group_id, person_id) VALUES (?, ?)")
-          .bind(gid, pid),
+          .prepare("INSERT INTO group_members (group_id, person_id, auto) VALUES (?, ?, ?)")
+          // Rewriting the list doesn't change how anyone got on it: a row the
+          // mirror put here stays the mirror's to sweep, and a patrol's own
+          // membership is always deliberate.
+          .bind(gid, pid, row.kind === "patrol" ? 0 : before.get(pid) ?? 0),
       ),
     );
   }
   if (row.kind === "patrol") {
     const kept = new Set(ids);
-    await syncUnitFromPatrols(c.env.DB, row.trip_id, ids, before.filter((pid) => !kept.has(pid)));
+    await syncUnitFromPatrols(c.env.DB, row.trip_id, ids, [...before.keys()].filter((pid) => !kept.has(pid)));
+  } else if (row.kind === "unit") {
+    // The unit list can't opt out of a patrol: re-mirror whoever the patrols
+    // still list, so an edit here (or a raw API call) can't leave someone on a
+    // patrol but off the trip.
+    await syncUnitFromPatrols(c.env.DB, row.trip_id, await patrolMemberIds(c.env.DB, row.trip_id), []);
   }
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });

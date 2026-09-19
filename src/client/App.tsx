@@ -3036,8 +3036,9 @@ function Patrols({ bundle, roster, run, busy }: TabProps) {
         attendee is one share, billed to the responsible adult (a youth → their parent;
         an adult → themselves) — or to the unit, for a guest the troop is hosting. Click a
         group's name to rename it — expenses and attendance stay put. Anyone you add
-        to a patrol joins the unit list automatically, tagged with the patrol they
-        came in with; drop them from the patrol to take them off both.
+        to a patrol joins the unit list too, tagged with the patrol they came in
+        with, and comes off it again when they leave that patrol — unless you'd
+        added them to the unit list yourself, in which case they stay.
       </small></p>
 
       <div className="row" style={{ marginBottom: 8 }}>
@@ -3095,9 +3096,9 @@ function PersonPicker({
   busy: boolean;
   onChange: (nextRefs: string[]) => void;
   placeholder?: string;
-  /** Group this person was carried in from (a patrol, on the unit list). Such a
-   *  chip is labelled with that group and can't be removed here — the group
-   *  they came from owns them. */
+  /** Group that holds this person here (a patrol, on the unit list). Such a chip
+   *  is labelled with that group and can't be removed here — while they're on a
+   *  patrol they're on the trip, so the unit list can't drop them. */
   sourceFor?: (ref: string) => string | null;
 }) {
   const valueSet = useMemo(() => new Set(value), [value]);
@@ -3153,7 +3154,7 @@ function PersonPicker({
             <span key={p.ref} className={`chip ${p.type === "scout" ? "chip-youth" : "chip-adult"}`}>
               <span>{p.name}</span>
               {src ? (
-                <span className="chip-src" title={`Added with ${src} — remove them there`}>{shortGroupName(src)}</span>
+                <span className="chip-src" title={`On ${src} — a patrol member is always on the unit list`}>{shortGroupName(src)}</span>
               ) : (
                 <button type="button" disabled={busy} onClick={() => remove(p.ref)} aria-label={`Remove ${p.name}`}>×</button>
               )}
@@ -3241,8 +3242,10 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
   const pool = useMemo(() => buildPool(bundle, roster, "all"), [bundle, roster]);
 
   // Adding someone to a patrol adds them to the unit list too (the Worker keeps
-  // the two in step). On the unit list those people are badged with the patrol
-  // they came in with, and are removed from that patrol rather than from here.
+  // the two in step). On the unit list those people are badged with their patrol
+  // and can't be removed here: on a patrol is on the trip. Whether leaving the
+  // patrol also takes them off the unit list is the Worker's call — it sweeps
+  // the rows it added, not the ones an organizer entered by hand.
   const patrolOf = useMemo(() => {
     if (group.kind !== "unit") return null;
     const patrolName = new Map(
