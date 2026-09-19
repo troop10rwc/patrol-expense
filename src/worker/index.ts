@@ -2,6 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { Hono } from "hono";
 import type {
   CostGroup,
+  GroupKind,
   Trip,
   TripBundle,
   SnapshotMeta,
@@ -396,9 +397,13 @@ api.patch("/groups/:gid", async (c) => {
 
 api.delete("/groups/:gid", async (c) => {
   const gid = Number(c.req.param("gid"));
-  const row = await c.env.DB.prepare("SELECT trip_id FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number }>();
+  const row = await c.env.DB.prepare("SELECT trip_id, kind FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number; kind: GroupKind }>();
   if (!row) return c.json(bad("group not found"), 404);
+  // Read the patrol's roll before the cascade wipes it, so the unit list can
+  // drop the people this patrol was the only reason for.
+  const wasOnPatrol = row.kind === "patrol" ? await groupMemberIds(c.env.DB, gid) : [];
   await c.env.DB.prepare("DELETE FROM cost_groups WHERE id = ?").bind(gid).run();
+  if (wasOnPatrol.length) await syncUnitFromPatrols(c.env.DB, row.trip_id, [], wasOnPatrol);
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
@@ -439,14 +444,77 @@ api.put("/groups/:gid/drivers", async (c) => {
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });
 
+// Everyone a cost group's membership lists, by person id.
+async function groupMemberIds(db: D1Database, gid: number): Promise<number[]> {
+  const rows = await db
+    .prepare("SELECT person_id FROM group_members WHERE group_id = ?")
+    .bind(gid)
+    .all<{ person_id: number }>();
+  return rows.results.map((r) => r.person_id);
+}
+
+// The trip's unit group — the cost center everything troop-wide is charged to.
+// A trip is scaffolded with exactly one ('Unit:Overall'); if a second is ever
+// added by hand, the first one stays the canonical one (as the sheet import
+// also assumes).
+async function unitGroupId(db: D1Database, tripId: number): Promise<number | null> {
+  const row = await db
+    .prepare("SELECT id FROM cost_groups WHERE trip_id = ? AND kind = 'unit' ORDER BY sort_order, id LIMIT 1")
+    .bind(tripId)
+    .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
+/**
+ * Being on a patrol means being on the trip, so patrol attendance is mirrored
+ * onto the unit group's list: `added` are inserted there (idempotently), and
+ * `removed` are dropped — but only the ones no remaining patrol still lists, so
+ * a scout on two patrols keeps their unit seat. The client marks the mirrored
+ * people with the patrol they came from.
+ *
+ * Provenance isn't stored, so a person hand-added to the unit list who was also
+ * on the patrol being edited leaves the unit list with them. Anyone never on a
+ * patrol is never touched.
+ */
+async function syncUnitFromPatrols(
+  db: D1Database,
+  tripId: number,
+  added: number[],
+  removed: number[],
+): Promise<void> {
+  const unitId = await unitGroupId(db, tripId);
+  if (unitId == null) return;
+  const stmts = [
+    ...added.map((pid) =>
+      db
+        .prepare("INSERT OR IGNORE INTO group_members (group_id, person_id) VALUES (?, ?)")
+        .bind(unitId, pid),
+    ),
+    ...removed.map((pid) =>
+      db
+        .prepare(
+          `DELETE FROM group_members WHERE group_id = ? AND person_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM group_members gm
+                 JOIN cost_groups g ON g.id = gm.group_id
+                WHERE gm.person_id = ? AND g.trip_id = ? AND g.kind = 'patrol')`,
+        )
+        .bind(unitId, pid, pid, tripId),
+    ),
+  ];
+  if (stmts.length) await db.batch(stmts);
+}
+
 // Replace a cost group's membership (adults + youth who attended). Shares are
-// derived from this.
+// derived from this. Editing a patrol also keeps the unit list in step — see
+// syncUnitFromPatrols.
 api.put("/groups/:gid/members", async (c) => {
   const gid = Number(c.req.param("gid"));
   const b = await c.req.json<{ refs?: string[]; person_ids?: number[] }>();
-  const row = await c.env.DB.prepare("SELECT trip_id FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number }>();
+  const row = await c.env.DB.prepare("SELECT trip_id, kind FROM cost_groups WHERE id = ?").bind(gid).first<{ trip_id: number; kind: GroupKind }>();
   if (!row) return c.json(bad("group not found"), 404);
   const ids = await resolvePeople(c, row.trip_id, b);
+  const before = row.kind === "patrol" ? await groupMemberIds(c.env.DB, gid) : [];
   await c.env.DB.prepare("DELETE FROM group_members WHERE group_id = ?").bind(gid).run();
   if (ids.length) {
     await c.env.DB.batch(
@@ -456,6 +524,10 @@ api.put("/groups/:gid/members", async (c) => {
           .bind(gid, pid),
       ),
     );
+  }
+  if (row.kind === "patrol") {
+    const kept = new Set(ids);
+    await syncUnitFromPatrols(c.env.DB, row.trip_id, ids, before.filter((pid) => !kept.has(pid)));
   }
   return c.json(await bundleResponse(c.env.DB, row.trip_id));
 });

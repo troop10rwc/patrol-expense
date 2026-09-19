@@ -3035,7 +3035,9 @@ function Patrols({ bundle, roster, run, busy }: TabProps) {
         youth via the autocomplete — or paste a list of names/emails to bulk-add. Each
         attendee is one share, billed to the responsible adult (a youth → their parent;
         an adult → themselves) — or to the unit, for a guest the troop is hosting. Click a
-        group's name to rename it — expenses and attendance stay put.
+        group's name to rename it — expenses and attendance stay put. Anyone you add
+        to a patrol joins the unit list automatically, tagged with the patrol they
+        came in with; drop them from the patrol to take them off both.
       </small></p>
 
       <div className="row" style={{ marginBottom: 8 }}>
@@ -3056,6 +3058,12 @@ function Patrols({ bundle, roster, run, busy }: TabProps) {
       ))}
     </div>
   );
+}
+
+// A cost group's name without its kind prefix ("Patrol:Hawks" -> "Hawks"), for
+// the tight spots — chips, badges — where the prefix is already implied.
+function shortGroupName(name: string): string {
+  return name.replace(/^(patrol|unit)\s*:\s*/i, "") || name;
 }
 
 // Normalize a string for matching: lowercase, strip "(...)", collapse whitespace.
@@ -3080,13 +3088,17 @@ function matchPick(token: string, pool: PickItem[]): PickItem | null {
  * both local people and (not-yet-projected) roster members are selectable.
  */
 function PersonPicker({
-  value, pool, busy, onChange, placeholder,
+  value, pool, busy, onChange, placeholder, sourceFor,
 }: {
   value: string[];
   pool: PickItem[];
   busy: boolean;
   onChange: (nextRefs: string[]) => void;
   placeholder?: string;
+  /** Group this person was carried in from (a patrol, on the unit list). Such a
+   *  chip is labelled with that group and can't be removed here — the group
+   *  they came from owns them. */
+  sourceFor?: (ref: string) => string | null;
 }) {
   const valueSet = useMemo(() => new Set(value), [value]);
   const byRef = useMemo(() => new Map(pool.map((p) => [p.ref, p])), [pool]);
@@ -3135,12 +3147,19 @@ function PersonPicker({
   return (
     <>
       <div className="chips">
-        {selected.map((p) => (
-          <span key={p.ref} className={`chip ${p.type === "scout" ? "chip-youth" : "chip-adult"}`}>
-            <span>{p.name}</span>
-            <button type="button" disabled={busy} onClick={() => remove(p.ref)} aria-label={`Remove ${p.name}`}>×</button>
-          </span>
-        ))}
+        {selected.map((p) => {
+          const src = sourceFor?.(p.ref) ?? null;
+          return (
+            <span key={p.ref} className={`chip ${p.type === "scout" ? "chip-youth" : "chip-adult"}`}>
+              <span>{p.name}</span>
+              {src ? (
+                <span className="chip-src" title={`Added with ${src} — remove them there`}>{shortGroupName(src)}</span>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => remove(p.ref)} aria-label={`Remove ${p.name}`}>×</button>
+              )}
+            </span>
+          );
+        })}
         {selected.length === 0 && <span className="hint">No one added yet.</span>}
       </div>
       <div className="ac">
@@ -3221,6 +3240,22 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
   const memberIds = summary.memberIds;
   const pool = useMemo(() => buildPool(bundle, roster, "all"), [bundle, roster]);
 
+  // Adding someone to a patrol adds them to the unit list too (the Worker keeps
+  // the two in step). On the unit list those people are badged with the patrol
+  // they came in with, and are removed from that patrol rather than from here.
+  const patrolOf = useMemo(() => {
+    if (group.kind !== "unit") return null;
+    const patrolName = new Map(
+      bundle.groups.filter((g) => g.kind === "patrol").map((g) => [g.id, g.name] as const),
+    );
+    const byPerson = new Map<number, string>();
+    for (const gm of bundle.members) {
+      const name = patrolName.get(gm.group_id);
+      if (name && !byPerson.has(gm.person_id)) byPerson.set(gm.person_id, name);
+    }
+    return byPerson;
+  }, [group.kind, bundle.groups, bundle.members]);
+
   // For each billable adult, the contributors (themselves + their attending
   // youth). Guests the unit is hosting are pooled separately: they still hold
   // shares, they're just charged to the troop. Mirrors deriveShares() in the
@@ -3283,6 +3318,7 @@ function MembersEditor({ group, bundle, roster, run, busy }: { group: CostGroup 
         pool={pool}
         busy={busy}
         onChange={(refs) => run(() => api.setMembers(group.id, refs))}
+        sourceFor={patrolOf ? (ref) => (ref.startsWith("id:") ? patrolOf.get(Number(ref.slice(3))) ?? null : null) : undefined}
       />
 
       {orphaned && (
