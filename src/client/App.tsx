@@ -2490,6 +2490,24 @@ function SlackReceipts({ bundle, roster, run, busy }: TabProps) {
   const pending = queue.filter((r) => r.status === "pending");
   const decided = queue.filter((r) => r.status !== "pending");
 
+  // A load that failed and a trip nobody has tagged anything for are different
+  // states, and the early return below reads them the same. Left that way the
+  // card just never appears — which is indistinguishable from "no receipts yet"
+  // and hides the two things most likely to be wrong: the migration not applied,
+  // or a session that lapsed while this tab was open. Say it out loud instead.
+  //
+  // Only when there's nothing else to render: once the queue is on screen, a
+  // failed approve/reject belongs in the banner inside the card, not in place of
+  // the work it failed on.
+  if (err && queue.length === 0) {
+    return (
+      <div className="card">
+        <h2 style={{ margin: "0 0 8px" }}>From Slack</h2>
+        <div className="err">Couldn't load receipts tagged in Slack — {err}</div>
+      </div>
+    );
+  }
+
   // Nothing has ever come from Slack for this trip: say nothing rather than
   // explain a feature that isn't in play.
   if (queue.length === 0) return null;
