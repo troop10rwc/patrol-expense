@@ -47,7 +47,9 @@ export async function loadEngineInput(db: D1Database, tripId: number): Promise<E
       db.prepare("SELECT * FROM prepayments WHERE trip_id = ? ORDER BY id").bind(tripId),
       db
         .prepare(
-          "SELECT gm.* FROM group_members gm JOIN cost_groups g ON g.id = gm.group_id WHERE g.trip_id = ?",
+          // Columns pinned, not gm.*: group_members.auto is the mirror's own
+          // bookkeeping (see migration 0009) and has no business on the bundle.
+          "SELECT gm.group_id, gm.person_id FROM group_members gm JOIN cost_groups g ON g.id = gm.group_id WHERE g.trip_id = ?",
         )
         .bind(tripId),
       db

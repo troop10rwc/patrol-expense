@@ -280,6 +280,13 @@ small.hint, .hint { color: var(--t10-ink-soft); }
   color: rgba(27,33,24,.42); padding: 0 6px; border-radius: 20px;
 }
 .chip button:hover { background: rgba(27,33,24,.10); color: var(--t10-ink); }
+/* Badge on a unit-list chip: the patrol that carried this person in. It takes
+   the ×'s place — they leave the unit list by leaving that patrol. */
+.chip-src {
+  font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; font-weight: 600;
+  padding: 1px 7px; margin-right: 3px; border-radius: 20px; cursor: default;
+  background: rgba(27,33,24,.08); color: inherit; opacity: .75;
+}
 
 /* ------------------------------------------------------------ Autocomplete */
 .ac { position: relative; max-width: 480px; }

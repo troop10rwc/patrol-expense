@@ -1,0 +1,14 @@
+-- Provenance for a membership row, so the unit list can tell what it owns.
+--
+-- Patrol attendance is mirrored onto the unit group (syncUnitFromPatrols in
+-- src/worker/index.ts): auto=1 marks a row the mirror created, auto=0 a person
+-- someone put on this list deliberately. Only the unit group ever carries auto=1
+-- rows — a patrol's own membership is always deliberate.
+--
+-- Without this, leaving a patrol swept the person off the unit list even when
+-- they'd been added there by hand first. Now only the mirror's own rows are
+-- swept, and a hand-added attendee stays until someone takes them off.
+--
+-- Existing rows all read as deliberate, which is the safe reading: no
+-- attendance already entered can be removed by a later patrol edit.
+ALTER TABLE group_members ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
