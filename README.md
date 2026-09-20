@@ -16,7 +16,8 @@ normalized D1 database, mounted as a same-origin tab at
 ```
 src/shared    types + constants (BASE_PATH=/manage/expenses, HOME_ADDRESS)
 src/worker    Hono API, session auth (auth.ts), roster reader, geo proxy, seed,
-              paysheet engine, notice mail (mail.ts, events.ts, inbound.ts)
+              paysheet engine, notice mail (mail.ts, events.ts, inbound.ts),
+              Slack receipt shortcut (slack.ts)
 src/client    React SPA (App.tsx), API client
 migrations    D1 schema
 ```
@@ -135,6 +136,94 @@ expense. Fix the receipt on the Expenses tab, snapshot again, then re-send.
 
 Payment instructions are per-trip (⚙ Settings), reproduced verbatim in notices
 for anyone who owes, and copied forward to each new trip.
+
+## Tagging receipts from Slack
+
+A parent posts a photo of a receipt in the trip's Slack channel and picks
+**Attach to expense report** from the message's ⋮ menu. A modal asks which
+expense report (trip), which patrol or unit group to charge it to, the amount,
+and what it was for. Submitting files it in a review queue at the top of the
+**Expenses** tab; a leader approves it there, and *that* is what creates the
+expense. Everything lives in `src/worker/slack.ts`.
+
+**Slack is not this app's identity, and that's the whole design.** Every other
+authenticated surface here is gated on the `__Secure-troop_session` cookie. A
+Slack workspace also holds guests, bots and people who've left the troop, so a
+signed Slack payload only ever proves "someone in the workspace" — never "this
+person may change the books". So a submission is **inert**, exactly like a
+`correction`: it queues a row and a photo and moves no money. The Slack user *is*
+correlated to a member (`users.slack_sub` in the shared `troop10-id` D1) so the
+treasurer sees who sent it and the payer arrives pre-filled, but a sender who
+can't be matched is shown as unmatched rather than quietly trusted.
+
+Approval hands the stored R2 objects to `expense_attachments` by key — no copy,
+and exactly one table points at each object at a time. Rejection deletes them and
+posts the reason back to the Slack thread.
+
+### Slack app setup (one-time)
+
+At <https://api.slack.com/apps> → **Create New App** → From scratch, in the
+troop's workspace.
+
+1. **OAuth & Permissions** → Bot Token Scopes: `files:read` (download the tagged
+   receipt), `chat:write` (reply in the thread), `commands` (required for
+   shortcuts). Install to the workspace and copy the **Bot User OAuth Token**
+   (`xoxb-…`).
+2. **Interactivity & Shortcuts** → on. Request URL:
+   `https://troop10rwc.org/manage/expenses/api/slack/interactions`
+3. Same page → **Shortcuts** → Create New Shortcut → **On messages**:
+   - Name: `Attach to expense report`
+   - Short description: `File this receipt against a trip`
+   - Callback ID: **`attach_receipt`** (must match `SHORTCUT_CALLBACK_ID`)
+4. Invite the bot to each trip channel (`/invite @<app name>`) — `files:read`
+   only reaches files in conversations it's in.
+5. Set the secrets:
+
+```sh
+wrangler secret put SLACK_SIGNING_SECRET   # Basic Information -> Signing Secret
+wrangler secret put SLACK_BOT_TOKEN        # OAuth & Permissions -> xoxb-...
+```
+
+Without either secret the feature is simply off: `/api/slack/interactions`
+answers `503` and nothing else in the app changes.
+
+Setting the trip's **Slack channel URL** (⚙ Settings) makes the modal default to
+that trip when the shortcut is used in its channel, so the common case needs no
+picking at all.
+
+### What's verified, and the one thing to confirm
+
+Every request is authenticated by Slack's `v0` HMAC over the **raw** body, with
+their five-minute replay window; the comparison runs through
+`crypto.subtle.verify`, which is constant-time. The route is registered before
+`app.route("/api", api)` installs `requireAuth`, for the same reason the public
+statement routes are — see the comment there.
+
+⚠️ **Confirm the `slack_sub` spelling once, on the first real submission.** The
+identity service stores the Slack OIDC `sub` claim in `troop10-id`'s
+`users.slack_sub`; Slack's OIDC `sub` is the bare member id (`U…`), which is what
+an interaction payload's `user.id` carries, and `resolveSlackMember` also tries
+the team-scoped `T…-U…` spelling in the same query. If the first queued receipt
+from a known member shows *"This Slack account isn't linked to a troop member"*,
+the identity service is storing a third form — read one `slack_sub` out of
+`troop10-id` and add it to the candidate list in `src/worker/slack.ts`. Nothing
+breaks meanwhile: the receipt still queues, the treasurer just picks the payer.
+
+### Limits
+
+Images and PDFs up to 10 MB (the shared rules in `attachments.ts`), at most 5
+files per message, and 20 pending submissions per Slack user — the same kind of
+flood stop the public correction route uses. A submission whose file can't be
+pulled out of Slack is deleted rather than left as an amount with nothing behind
+it, and the failure is said out loud in the thread.
+
+### Local development
+
+A real workspace can't reach `localhost`, so testing the shortcut end to end
+needs a tunnel (`cloudflared tunnel --url http://localhost:5173`) with the
+tunnel's URL as the Interactivity Request URL. Without one, put any value in
+`SLACK_SIGNING_SECRET` and POST a signed payload yourself — the signature is
+`v0=` + HMAC-SHA256 of `v0:<timestamp>:<raw body>`.
 
 ## Email setup (one-time, Cloudflare + Google Workspace)
 

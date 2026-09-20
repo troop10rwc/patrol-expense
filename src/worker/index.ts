@@ -11,6 +11,9 @@ import type {
   Correction,
   CorrectionAttachment,
   CorrectionStatus,
+  SlackReceipt,
+  SlackReceiptFile,
+  SlackReceiptStatus,
 } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
@@ -27,6 +30,7 @@ import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { sendNotice, worthSending } from "./mail.ts";
 import { handleEmailEvents } from "./events.ts";
 import { handleInboundEmail } from "./inbound.ts";
+import { handleSlackInteraction, notifyReviewed, verifySlackSignature } from "./slack.ts";
 import { MAX_ATTACHMENT_BYTES, validateAttachment, safeFilename } from "./attachments.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -42,6 +46,11 @@ interface Bindings extends AuthBindings {
   MAIL_FROM_NAME?: string;
   REPLY_DOMAIN?: string; // Email Routing subdomain that catches replies
   MAIL_FALLBACK?: string; // verified destination for mail we can't attribute
+  // Slack app credentials for the "Attach to expense report" message shortcut.
+  // Both are secrets (`wrangler secret put`). Absent either one, the feature is
+  // simply off: the interactions route answers 503 and nothing else changes.
+  SLACK_SIGNING_SECRET?: string;
+  SLACK_BOT_TOKEN?: string;
 }
 
 type Env = { Bindings: Bindings; Variables: { user: Identity } };
@@ -923,6 +932,179 @@ api.patch("/corrections/:cid", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- receipts tagged from Slack (review queue) ----
+// A parent tags a receipt photo in Slack and it lands here, inert. Nothing from
+// Slack is money until a leader approves it below — see slack.ts for why Slack
+// workspace membership can't be treated as this app's identity.
+
+type SlackReceiptRow = {
+  id: number; trip_id: number; group_id: number; slack_user_id: string; slack_user_name: string;
+  submitter_email: string | null; payer_id: number | null; description: string; amount: number;
+  slack_channel_id: string | null; slack_message_ts: string | null; slack_permalink: string | null;
+  status: SlackReceiptStatus; expense_id: number | null; reviewed_by: string | null;
+  reviewed_at: string | null; review_note: string | null; created_at: string;
+  groupName: string | null; payerName: string | null;
+};
+
+api.get("/trips/:id/slack-receipts", async (c) => {
+  const tripId = Number(c.req.param("id"));
+  const { results } = await c.env.DB.prepare(
+    `SELECT r.id, r.trip_id, r.group_id, r.slack_user_id, r.slack_user_name, r.submitter_email,
+            r.payer_id, r.description, r.amount, r.slack_channel_id, r.slack_message_ts,
+            r.slack_permalink, r.status, r.expense_id, r.reviewed_by, r.reviewed_at,
+            r.review_note, r.created_at, g.name AS groupName, p.name AS payerName
+       FROM slack_receipts r
+       LEFT JOIN cost_groups g ON g.id = r.group_id
+       LEFT JOIN people p ON p.id = r.payer_id
+      WHERE r.trip_id = ?
+      ORDER BY r.id DESC`,
+  )
+    .bind(tripId)
+    .all<SlackReceiptRow>();
+
+  const rows = results ?? [];
+  const byReceipt = new Map<number, SlackReceiptFile[]>();
+  if (rows.length) {
+    const { results: files } = await c.env.DB.prepare(
+      "SELECT id, receipt_id, filename, content_type, size FROM slack_receipt_files WHERE trip_id = ? ORDER BY id",
+    )
+      .bind(tripId)
+      .all<SlackReceiptFile>();
+    for (const f of files ?? []) {
+      const list = byReceipt.get(f.receipt_id) ?? [];
+      list.push(f);
+      byReceipt.set(f.receipt_id, list);
+    }
+  }
+  return c.json(rows.map((r): SlackReceipt => ({ ...r, files: byReceipt.get(r.id) ?? [] })));
+});
+
+// The queued photo itself. Same authenticated, streamed-through-the-Worker
+// treatment as every other receipt: the bucket is never public.
+api.get("/slack-receipt-files/:fid", async (c) => {
+  const row = await c.env.DB
+    .prepare("SELECT r2_key, filename, content_type FROM slack_receipt_files WHERE id = ?")
+    .bind(Number(c.req.param("fid")))
+    .first<{ r2_key: string; filename: string; content_type: string }>();
+  if (!row) return c.json(bad("file not found"), 404);
+  const obj = await c.env.RECEIPTS.get(row.r2_key);
+  if (!obj) return c.json(bad("file not found"), 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("Content-Type", row.content_type);
+  headers.set("Content-Disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+  headers.set("Cache-Control", "private, max-age=3600");
+  return new Response(obj.body, { headers });
+});
+
+/** Load a queued receipt that hasn't been decided yet. */
+async function pendingSlackReceipt(db: D1Database, rid: number) {
+  const row = await db.prepare("SELECT * FROM slack_receipts WHERE id = ?").bind(rid).first<SlackReceiptRow>();
+  if (!row) return { row: null, error: bad("that Slack receipt is gone"), status: 404 as const };
+  if (row.status !== "pending")
+    return { row: null, error: bad(`that receipt was already ${row.status}`), status: 409 as const };
+  return { row, error: null, status: 200 as const };
+}
+
+/**
+ * Approve a queued receipt: this is the only place a Slack submission becomes an
+ * expense. The leader can correct any of it first — Slack collected an amount
+ * typed on a phone next to a photo, and the four fields below are exactly what
+ * the Expenses tab's own "Add a receipt" form asks for.
+ *
+ * The files are handed over by r2_key rather than copied: the objects are
+ * already in the bucket, and moving ownership in the same batch that clears the
+ * queue rows keeps exactly one table pointing at each object.
+ */
+api.post("/slack-receipts/:rid/approve", async (c) => {
+  const rid = Number(c.req.param("rid"));
+  const { row, error, status } = await pendingSlackReceipt(c.env.DB, rid);
+  if (!row) return c.json(error, status);
+
+  type ApproveBody = { group_id?: number; payer_id?: number; payer_ref?: string; description?: string; amount?: number };
+  const b = await c.req.json<ApproveBody>().catch((): ApproveBody => ({}));
+
+  const groupId = Number(b.group_id ?? row.group_id);
+  const group = await c.env.DB.prepare(
+    "SELECT id FROM cost_groups WHERE id = ? AND trip_id = ? AND kind != 'travel'",
+  )
+    .bind(groupId, row.trip_id)
+    .first<{ id: number }>();
+  if (!group) return c.json(bad("pick a patrol or unit group on this trip"), 400);
+
+  const payerId = b.payer_ref
+    ? await resolveRef(c.env.DB, c.env.ROSTER, row.trip_id, b.payer_ref)
+    : Number(b.payer_id ?? row.payer_id ?? 0);
+  // Null is the normal state for a submission whose sender isn't on the trip (or
+  // was never matched to a member), so this is a prompt, not a failure.
+  if (!payerId) return c.json(bad("pick who paid for this before approving"), 400);
+
+  const description = (b.description ?? row.description).trim();
+  if (!description) return c.json(bad("a receipt needs a description"), 400);
+  const amount = b.amount == null ? row.amount : Number(b.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return c.json(bad("amount must be a positive number"), 400);
+
+  const ins = await c.env.DB.prepare(
+    "INSERT INTO expenses (trip_id, group_id, description, amount, payer_id) VALUES (?, ?, ?, ?, ?)",
+  )
+    .bind(row.trip_id, groupId, description, amount, payerId)
+    .run();
+  const expenseId = Number(ins.meta.last_row_id);
+
+  const { results: files } = await c.env.DB
+    .prepare("SELECT id, r2_key, filename, content_type, size FROM slack_receipt_files WHERE receipt_id = ?")
+    .bind(rid)
+    .all<{ id: number; r2_key: string; filename: string; content_type: string; size: number }>();
+
+  await c.env.DB.batch([
+    ...(files ?? []).map((f) =>
+      c.env.DB.prepare(
+        "INSERT INTO expense_attachments (expense_id, trip_id, r2_key, filename, content_type, size) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(expenseId, row.trip_id, f.r2_key, f.filename, f.content_type, f.size),
+    ),
+    c.env.DB.prepare("DELETE FROM slack_receipt_files WHERE receipt_id = ?").bind(rid),
+    c.env.DB.prepare(
+      `UPDATE slack_receipts
+          SET status = 'approved', expense_id = ?, group_id = ?, payer_id = ?,
+              description = ?, amount = ?, reviewed_by = ?, reviewed_at = datetime('now')
+        WHERE id = ?`,
+    ).bind(expenseId, groupId, payerId, description, amount, c.get("user").email, rid),
+  ]);
+
+  // Close the loop where the ask was made. Fire-and-forget: Slack being down
+  // must never make a treasurer's approval fail or wait.
+  c.executionCtx.waitUntil(notifyReviewed(c.env, { ...row, description, amount }, "approved", null).catch(() => {}));
+
+  return c.json(await bundleResponse(c.env.DB, row.trip_id));
+});
+
+/** Turn one down. The photo goes with it — we asked for it, we didn't take it. */
+api.post("/slack-receipts/:rid/reject", async (c) => {
+  const rid = Number(c.req.param("rid"));
+  const { row, error, status } = await pendingSlackReceipt(c.env.DB, rid);
+  if (!row) return c.json(error, status);
+
+  const b = await c.req.json<{ note?: string }>().catch((): { note?: string } => ({}));
+  const note = (b.note ?? "").trim().slice(0, 500) || null;
+
+  const { results: files } = await c.env.DB
+    .prepare("SELECT r2_key FROM slack_receipt_files WHERE receipt_id = ?")
+    .bind(rid)
+    .all<{ r2_key: string }>();
+  const keys = (files ?? []).map((f) => f.r2_key);
+  if (keys.length) await c.env.RECEIPTS.delete(keys);
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM slack_receipt_files WHERE receipt_id = ?").bind(rid),
+    c.env.DB.prepare(
+      "UPDATE slack_receipts SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
+    ).bind(note, c.get("user").email, rid),
+  ]);
+
+  c.executionCtx.waitUntil(notifyReviewed(c.env, row, "rejected", note).catch(() => {}));
+  return c.json({ ok: true });
+});
+
 // What changed since the most recent snapshot (null when none exists yet).
 api.get("/trips/:id/changes", async (c) => {
   const tripId = Number(c.req.param("id"));
@@ -1241,6 +1423,43 @@ app.post("/api/public/statement/:token/corrections", async (c) => {
     await buildPublicStatement(c.env.DB, c.env.ROSTER, notice, email, await reportedCorrections(c.env.DB, link.trip_id, link.person_id)),
     201,
   );
+});
+
+// ---- Slack interactivity (signed by Slack, no session cookie) ----
+// The app's second unauthenticated surface, and like the statement routes above
+// it MUST be registered before `app.route("/api", api)` installs requireAuth
+// across /api/*. Slack has no session cookie to send: the HMAC over the raw body
+// IS the whole credential, which is why nothing below runs before it verifies,
+// and why what a verified request may do is deliberately limited to filling a
+// review queue (see slack.ts).
+app.post("/api/slack/interactions", async (c) => {
+  const secret = c.env.SLACK_SIGNING_SECRET;
+  if (!secret) return c.text("slack is not configured", 503);
+
+  // The signature covers the RAW body, so it has to be read as text and left
+  // alone until it verifies — re-encoding a parsed form would change the bytes.
+  const raw = await c.req.text();
+  const verified = await verifySlackSignature(
+    raw,
+    c.req.header("x-slack-request-timestamp") ?? null,
+    c.req.header("x-slack-signature") ?? null,
+    secret,
+  );
+  if (!verified) return c.text("bad signature", 401);
+
+  const encoded = new URLSearchParams(raw).get("payload");
+  if (!encoded) return c.text("", 200);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(encoded);
+  } catch {
+    return c.text("", 200);
+  }
+
+  const reply = await handleSlackInteraction(c.env, payload, c.executionCtx);
+  // An empty 200 tells Slack "handled"; a JSON body is only ever a
+  // view_submission response_action (close the modal, or show a field error).
+  return reply ? c.json(reply) : c.text("", 200);
 });
 
 app.route("/api", api);

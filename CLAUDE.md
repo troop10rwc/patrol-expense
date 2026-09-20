@@ -20,7 +20,7 @@ distances. Full details in [STACK.md](./STACK.md).
 ```
 src/shared    types + constants (BASE_PATH=/manage/expenses, HOME_ADDRESS)
 src/worker    Hono API, session auth, roster reader, geo proxy, seed, paysheet engine,
-              notice mail (mail.ts / events.ts / inbound.ts)
+              notice mail (mail.ts / events.ts / inbound.ts), Slack shortcut (slack.ts)
 src/client    React SPA (App.tsx), API client
 migrations    D1 schema
 ```
@@ -62,6 +62,15 @@ npm run deploy              # build + wrangler deploy (production)
   inbound mail. Replies are scoped to `reply.troop10rwc.org`. If apex email DNS
   ever needs re-touching, re-verify both directions before walking away; see
   [README](./README.md#3-inbound-replies--apex-safe-but-the-order-matters).
+- **Slack can tag a receipt onto a trip, but it can never write one.** The
+  "Attach to expense report" message shortcut (`src/worker/slack.ts`) queues into
+  `slack_receipts`, inert like `corrections`; a leader approving it on the
+  Expenses tab is what creates the expense. Slack workspace membership is not
+  this app's identity — the session cookie is — so don't add a path that lets a
+  signed Slack payload move a number. The submitter is correlated to a member via
+  `users.slack_sub` in `IDDB`, and an unmatched sender is surfaced, not assumed.
+  Needs `SLACK_SIGNING_SECRET` + `SLACK_BOT_TOKEN`; absent either, the route 503s
+  and nothing else changes. Runbook: [README](./README.md#tagging-receipts-from-slack).
 - Don't raise `_dmarc` past `p=none` without first checking the aggregate reports
   for other senders using the domain. Runbook: [README](./README.md#email-setup).
 - Run `npm run typecheck` before committing.

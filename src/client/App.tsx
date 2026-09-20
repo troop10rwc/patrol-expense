@@ -18,6 +18,7 @@ import type {
   NoticeLink,
   Correction,
   CorrectionKind,
+  SlackReceipt,
   PublicStatement,
   PaysheetRow,
 } from "../shared/types.ts";
@@ -1065,7 +1066,15 @@ function TripView({ uuid }: { uuid: string }) {
 
       {tab === "patrols" && <Patrols bundle={bundle} roster={roster} run={run} busy={busy} />}
       {tab === "travel" && <Travel bundle={bundle} roster={roster} run={run} busy={busy} />}
-      {tab === "expenses" && <Expenses bundle={bundle} roster={roster} run={run} busy={busy} />}
+      {tab === "expenses" && (
+        <>
+          {/* Receipts tagged in Slack land in a review queue above the tab's own
+              entry form: it's the same job (get a receipt onto the report), and
+              a leader shouldn't have to go looking for work that arrived. */}
+          <SlackReceipts bundle={bundle} roster={roster} run={run} busy={busy} />
+          <Expenses bundle={bundle} roster={roster} run={run} busy={busy} />
+        </>
+      )}
       {tab === "reimbursement" && <Reimbursement bundle={bundle} roster={roster} run={run} busy={busy} />}
       {tab === "settings" && <Settings bundle={bundle} roster={roster} run={run} busy={busy} />}
     </div>
@@ -2331,6 +2340,235 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
 
 // ------------------------------------------------------------------ Expenses
 const ATTACHMENT_ACCEPT = "image/*,application/pdf";
+
+// ------------------------------------------- receipts tagged from Slack
+/**
+ * The review queue for receipts tagged in Slack.
+ *
+ * A Slack submission is a request, not a record. It arrives from a workspace
+ * that also holds guests, bots and people who've left the troop, so none of what
+ * it says is trusted until a leader confirms it — approving is the only thing
+ * that creates an expense. That's also why every field arrives filled in but
+ * editable: this is a write the leader didn't type, so they see all of it, with
+ * the photo beside the amount it's meant to justify, before it becomes money.
+ */
+function SlackReceipts({ bundle, roster, run, busy }: TabProps) {
+  const [queue, setQueue] = useState<SlackReceipt[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [showDecided, setShowDecided] = useState(false);
+  const tripId = bundle.trip.id;
+
+  const reload = useCallback(async () => {
+    try {
+      setQueue(await api.listSlackReceipts(tripId));
+      setErr(null);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, [tripId]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const adultPool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
+  const pending = queue.filter((r) => r.status === "pending");
+  const decided = queue.filter((r) => r.status !== "pending");
+
+  // Nothing has ever come from Slack for this trip: say nothing rather than
+  // explain a feature that isn't in play.
+  if (queue.length === 0) return null;
+
+  async function approve(rid: number, body: Parameters<typeof api.approveSlackReceipt>[1]) {
+    await run(() => api.approveSlackReceipt(rid, body));
+    await reload();
+  }
+
+  async function reject(rid: number, note: string) {
+    try {
+      await api.rejectSlackReceipt(rid, note || undefined);
+    } catch (e) {
+      setErr(String(e));
+    }
+    await reload();
+  }
+
+  return (
+    <div className="card">
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>
+          From Slack
+          {pending.length > 0 && <span className="pill" style={{ marginLeft: 8 }}>{pending.length} to review</span>}
+        </h2>
+        <div className="spacer" />
+        {decided.length > 0 && (
+          <label className="row" style={{ alignItems: "center", gap: 6 }}>
+            <input type="checkbox" checked={showDecided} onChange={(e) => setShowDecided(e.target.checked)} />
+            <span className="hint">Show reviewed ({decided.length})</span>
+          </label>
+        )}
+      </div>
+
+      {err && <div className="err">{err}</div>}
+
+      {pending.length === 0 ? (
+        <p className="hint">Nothing waiting — every receipt tagged in Slack has been dealt with.</p>
+      ) : (
+        pending.map((r) => (
+          <PendingSlackReceipt
+            key={r.id}
+            receipt={r}
+            bundle={bundle}
+            adultPool={adultPool}
+            busy={busy}
+            onApprove={(body) => approve(r.id, body)}
+            onReject={(note) => reject(r.id, note)}
+          />
+        ))
+      )}
+
+      {showDecided && decided.length > 0 && (
+        <table style={{ marginTop: 16 }}>
+          <thead>
+            <tr><th>Tagged by</th><th>What</th><th className="num">Amount</th><th>Outcome</th><th>Reviewed</th></tr>
+          </thead>
+          <tbody>
+            {decided.map((r) => (
+              <tr key={r.id} className="zero">
+                <td>{r.slack_user_name}</td>
+                <td>
+                  {r.slack_permalink
+                    ? <a href={r.slack_permalink} target="_blank" rel="noreferrer">{r.description} ↗</a>
+                    : r.description}
+                </td>
+                <td className="num">{money(r.amount)}</td>
+                <td>
+                  {r.status === "approved" ? "✅ Added" : "🚫 Turned down"}
+                  {r.review_note && <div className="hint">{r.review_note}</div>}
+                </td>
+                <td className="hint">{r.reviewed_at ? fmtTime(r.reviewed_at) : ""}{r.reviewed_by ? ` · ${r.reviewed_by}` : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <p><small className="hint">
+        Tagged with <strong>Attach to expense report</strong> from a message's ⋮ menu in Slack.
+        Approving adds it as a receipt on this trip — nothing from Slack changes a number before that.
+      </small></p>
+    </div>
+  );
+}
+
+/** One queued receipt, filled in from Slack and editable before it's approved. */
+function PendingSlackReceipt({
+  receipt, bundle, adultPool, busy, onApprove, onReject,
+}: {
+  receipt: SlackReceipt;
+  bundle: TripBundle;
+  adultPool: PickItem[];
+  busy: boolean;
+  onApprove: (body: Parameters<typeof api.approveSlackReceipt>[1]) => Promise<void>;
+  onReject: (note: string) => Promise<void>;
+}) {
+  const costGroups = bundle.groups.filter((g) => g.kind !== "travel");
+  const [groupId, setGroupId] = useState(receipt.group_id);
+  // Empty when Slack couldn't be correlated to somebody on this trip — the
+  // leader has to say who paid, and Approve stays disabled until they do.
+  const [payerRef, setPayerRef] = useState(receipt.payer_id ? `id:${receipt.payer_id}` : "");
+  const [desc, setDesc] = useState(receipt.description);
+  const [amount, setAmount] = useState(receipt.amount.toFixed(2));
+  const [rejecting, setRejecting] = useState(false);
+  const [note, setNote] = useState("");
+
+  const amt = parseFloat(amount);
+  const ready = !!payerRef && !!desc.trim() && Number.isFinite(amt) && amt > 0;
+
+  return (
+    <div className="slack-receipt">
+      <div className="slack-receipt-photos">
+        {receipt.files.map((f) => (
+          <a
+            key={f.id}
+            href={api.slackReceiptFileUrl(f.id)}
+            target="_blank"
+            rel="noreferrer"
+            title={`${f.filename} (${Math.round(f.size / 1024)} KB)`}
+          >
+            {f.content_type.startsWith("image/")
+              ? <img src={api.slackReceiptFileUrl(f.id)} alt={f.filename} />
+              : <span className="pill">📄 {f.filename}</span>}
+          </a>
+        ))}
+      </div>
+
+      <div className="slack-receipt-body">
+        <div className="hint" style={{ marginBottom: 8 }}>
+          Tagged by <strong>{receipt.slack_user_name}</strong>
+          {receipt.submitter_email && ` · ${receipt.submitter_email}`}
+          {" · "}{fmtTime(receipt.created_at)}
+          {receipt.slack_permalink && (
+            <> · <a href={receipt.slack_permalink} target="_blank" rel="noreferrer">the message ↗</a></>
+          )}
+        </div>
+
+        {/* Correlation missed: the sender is in Slack but isn't a signed-in
+            member, so there's no email to match a payer against. Worth saying
+            out loud — it's the difference between "we know who this is" and
+            "somebody in the workspace". */}
+        {!receipt.submitter_email && (
+          <p className="warn-note">
+            This Slack account isn't linked to a troop member, so nobody was matched automatically.
+            Check who actually paid before approving.
+          </p>
+        )}
+
+        <div className="row">
+          <label className="fld">Cost group
+            <select value={groupId} disabled={busy} onChange={(e) => setGroupId(Number(e.target.value))}>
+              {costGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+          </label>
+          <label className="fld">Paid by
+            <select value={payerRef} disabled={busy} onChange={(e) => setPayerRef(e.target.value)}>
+              <option value="">Who paid?</option>
+              {adultPool.map((p) => <option key={p.ref} value={p.ref}>{p.name}</option>)}
+            </select>
+          </label>
+          <label className="fld" style={{ flex: 1, minWidth: 160 }}>Description
+            <input value={desc} disabled={busy} onChange={(e) => setDesc(e.target.value)} />
+          </label>
+          <label className="fld">Amount
+            <input className="sm" value={amount} disabled={busy} inputMode="decimal" onChange={(e) => setAmount(e.target.value)} />
+          </label>
+          <button
+            className="btn"
+            disabled={busy || !ready}
+            onClick={() => onApprove({ group_id: groupId, payer_ref: payerRef, description: desc.trim(), amount: amt })}
+          >
+            Approve
+          </button>
+          <button className="btn ghost" disabled={busy} onClick={() => setRejecting((v) => !v)}>
+            {rejecting ? "Cancel" : "Turn down"}
+          </button>
+        </div>
+
+        {rejecting && (
+          <div className="row" style={{ marginTop: 8 }}>
+            <label className="fld" style={{ flex: 1, minWidth: 220 }}>Why <span className="hint">(sent back to the Slack thread)</span>
+              <input
+                value={note}
+                disabled={busy}
+                placeholder="e.g. already entered from the paper receipt"
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </label>
+            <button className="btn danger" disabled={busy} onClick={() => onReject(note)}>Turn down</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Expenses({ bundle, roster, run, busy }: TabProps) {
   const { personById } = useMaps(bundle);

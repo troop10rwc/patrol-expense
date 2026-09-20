@@ -391,6 +391,25 @@ td.correction-msg { white-space: pre-wrap; max-width: 420px; }
   border: 1px solid var(--t10-line); border-radius: var(--t10-r-sm); display: block;
 }
 
+/* ---- Receipts tagged from Slack, waiting for review ---- */
+/* The photo leads: a leader is checking an amount somebody typed on a phone
+   against the receipt it came from, so the two have to sit side by side. */
+.slack-receipt {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 12px 0; border-top: 1px solid var(--t10-line);
+}
+.slack-receipt:first-of-type { border-top: 0; }
+.slack-receipt-body { flex: 1; min-width: 0; }
+.slack-receipt-photos { display: flex; flex-direction: column; gap: 6px; }
+.slack-receipt-photos img {
+  width: 104px; height: 104px; object-fit: cover;
+  border: 1px solid var(--t10-line); border-radius: var(--t10-r-sm); display: block;
+}
+@media (max-width: 720px) {
+  .slack-receipt { flex-direction: column; }
+  .slack-receipt-photos { flex-direction: row; flex-wrap: wrap; }
+}
+
 /* Caution that isn't an error: the action is allowed, the leader just needs to
    know what they're about to send (stale figures, no payment details). */
 .warn-note {

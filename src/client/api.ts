@@ -1,7 +1,7 @@
 import type {
   Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot,
   ImportPreview, PersonStatement, PersonNotice, NoticeLink, Correction, CorrectionKind,
-  CorrectionStatus, PublicStatement, NoticeSendStatus,
+  CorrectionStatus, PublicStatement, NoticeSendStatus, SlackReceipt,
 } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
@@ -197,6 +197,20 @@ export const api = {
   correctionAttachmentUrl: (aid: number) => `${BASE_PATH}/api/correction-attachments/${aid}`,
   setCorrectionStatus: (cid: number, status: CorrectionStatus) =>
     req<{ ok: true }>(`/api/corrections/${cid}`, { method: "PATCH", body: JSON.stringify({ status }) }),
+
+  // ---- receipts tagged from Slack ----
+  // Queued by the "Attach to expense report" message shortcut and inert until
+  // approved here — approving is what creates the expense, which is why it
+  // returns the whole bundle like every other write that moves a number.
+  listSlackReceipts: (tripId: number) => req<SlackReceipt[]>(`/api/trips/${tripId}/slack-receipts`),
+  // Same-origin, so the session cookie rides along and this works as an <img> src.
+  slackReceiptFileUrl: (fid: number) => `${BASE_PATH}/api/slack-receipt-files/${fid}`,
+  approveSlackReceipt: (
+    rid: number,
+    body: { group_id?: number; payer_id?: number; payer_ref?: string; description?: string; amount?: number },
+  ) => req<TripBundle>(`/api/slack-receipts/${rid}/approve`, { method: "POST", body: JSON.stringify(body) }),
+  rejectSlackReceipt: (rid: number, note?: string) =>
+    req<{ ok: true }>(`/api/slack-receipts/${rid}/reject`, { method: "POST", body: JSON.stringify({ note }) }),
 
   // ---- Google Sheet import (preview -> commit) ----
   importPreview: (sheetUrl: string) =>
