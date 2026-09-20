@@ -1,0 +1,64 @@
+# Slack app manifest for "Expenses" — the Attach to expense report message shortcut.
+#
+# Upload at https://api.slack.com/apps -> Create New App -> From an app manifest,
+# in the Troop 10 workspace. Re-upload it later (App Manifest -> paste -> Save)
+# to reapply config that drifted.
+#
+# The manifest configures the app; it does NOT install it or hand you any
+# credentials. After creating it you still have to:
+#
+#   1. OAuth & Permissions -> Install to Workspace, then copy the Bot User OAuth
+#      Token (xoxb-...)          -> wrangler secret put SLACK_BOT_TOKEN
+#   2. Basic Information -> Signing Secret
+#                                -> wrangler secret put SLACK_SIGNING_SECRET
+#   3. Invite the bot to each trip channel (/invite @Expenses). files:read only
+#      reaches files in conversations the bot is a member of, so without this the
+#      receipt download fails and the submission is discarded.
+#
+# The three scopes are exactly what src/worker/slack.ts uses and no more:
+#   files:read  — download the tagged receipt (files.info / url_private_download)
+#   chat:write  — reply in the message's thread with what happened
+#   commands    — required by Slack for any shortcut, including message shortcuts
+#
+# request_url must stay in step with the route registered in src/worker/index.ts.
+# Full runbook: README.md#tagging-receipts-from-slack
+
+display_information:
+  name: Expenses
+  description: File a receipt photo against a Troop 10 trip's expense report.
+  long_description: >-
+    Tag a receipt in Slack and it goes straight to the treasurer. Post the photo
+    in the trip's channel, pick "Attach to expense report" from the message's
+    ⋮ menu, and say which trip and which patrol it belongs to along with the
+    amount. It lands in a review queue in the expense app — a leader confirms it
+    before anything is charged to anyone — and this app replies in the thread to
+    tell you whether it was added or turned down.
+  background_color: "#1d3d27"
+
+features:
+  bot_user:
+    display_name: Expenses
+    always_online: false
+  shortcuts:
+    - name: Attach to expense report
+      type: message
+      # Must match SHORTCUT_CALLBACK_ID in src/worker/slack.ts. Change one and
+      # the shortcut silently stops doing anything: the payload arrives, fails
+      # the callback_id check, and returns an empty 200.
+      callback_id: attach_receipt
+      description: File this receipt against a trip's expense report.
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - commands
+      - files:read
+
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://troop10rwc.org/manage/expenses/api/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

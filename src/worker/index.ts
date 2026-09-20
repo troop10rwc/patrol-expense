@@ -1190,6 +1190,13 @@ api.post("/slack-receipts/:rid/approve", async (c) => {
   // was never matched to a member), so this is a prompt, not a failure.
   if (!payerId) return c.json(bad("pick who paid for this before approving"), 400);
 
+  // Same guard every other payer-setting path gets: computePaysheet builds one
+  // row per adult, so a receipt fronted by a youth would count toward
+  // totalExpenses while landing in nobody's balance. The review UI only offers
+  // adults, but this endpoint takes a bare payer_id/payer_ref.
+  const payerError = await rejectNonAdults(c.env.DB, row.trip_id, [payerId], "payer");
+  if (payerError) return c.json(bad(payerError), 400);
+
   const description = (b.description ?? row.description).trim();
   if (!description) return c.json(bad("a receipt needs a description"), 400);
   const amount = b.amount == null ? row.amount : Number(b.amount);
