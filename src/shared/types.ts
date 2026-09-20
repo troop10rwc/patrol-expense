@@ -515,3 +515,57 @@ export interface TripSummary {
   settleTotal: number; // people with a nonzero net balance
   settleDone: number; // of those, how many are marked 'paid' (reimbursement complete)
 }
+
+// ----- receipts tagged from Slack -----
+// A parent posts a receipt photo in the trip's Slack channel and picks "Attach
+// to expense report" from the message's ⋮ menu; the modal asks which expense
+// report (trip) and which cost group (patrol or unit) it belongs to.
+//
+// Like `Correction`, this is inert: it waits in a review queue on the Expenses
+// tab and changes nothing until a leader approves it. Slack workspace membership
+// isn't the app's identity — the session cookie is — so a Slack submission never
+// writes an expense on its own.
+
+export type SlackReceiptStatus = "pending" | "approved" | "rejected";
+
+/** A file carried by the tagged Slack message, already stored in R2. */
+export interface SlackReceiptFile {
+  id: number;
+  receipt_id: number;
+  filename: string;
+  content_type: string;
+  size: number;
+}
+
+export interface SlackReceipt {
+  id: number;
+  trip_id: number;
+  /** The cost group Slack asked to charge it to. A leader can override this at
+   *  approval; this records what was submitted. */
+  group_id: number;
+  groupName: string | null;
+  /** Raw Slack member id from the signed interaction payload. Always present. */
+  slack_user_id: string;
+  /** Slack display name — the only identity we have when correlation missed. */
+  slack_user_name: string;
+  /** The troop member the Slack user correlated to, via the shared identity DB
+   *  (`users.slack_sub`). Null when the submitter has never signed in to the
+   *  troop apps, which the review queue shows rather than hides. */
+  submitter_email: string | null;
+  /** That member projected onto this trip's people table, when they're on the
+   *  trip. Null means the leader has to pick the payer before approving. */
+  payer_id: number | null;
+  payerName: string | null;
+  description: string;
+  amount: number;
+  slack_channel_id: string | null;
+  slack_permalink: string | null;
+  status: SlackReceiptStatus;
+  /** The expense approval created — the audit link from a message to the money. */
+  expense_id: number | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  created_at: string;
+  files: SlackReceiptFile[];
+}

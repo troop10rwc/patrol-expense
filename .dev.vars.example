@@ -17,3 +17,16 @@ DEV_AUTH_BYPASS=1
 
 # Tells the Worker to serve assets the Vite-dev way (prefixed paths).
 ENVIRONMENT=development
+
+# --- Slack "Attach to expense report" shortcut (src/worker/slack.ts) ---
+# From the Slack app config: Basic Information -> Signing Secret, and
+# OAuth & Permissions -> Bot User OAuth Token (scopes: files:read, chat:write,
+# commands). Leave both unset to turn the feature off — the interactions route
+# then answers 503 and nothing else in the app changes.
+#
+# A real workspace cannot reach localhost, so driving the shortcut for real needs
+# a tunnel (cloudflared tunnel --url http://localhost:5173) registered as the
+# Interactivity Request URL. To exercise the route without one, put any value
+# here and sign your own payload: v0= + HMAC-SHA256 of "v0:<timestamp>:<raw body>".
+SLACK_SIGNING_SECRET=local-dev-signing-secret
+SLACK_BOT_TOKEN=xoxb-your-bot-token
