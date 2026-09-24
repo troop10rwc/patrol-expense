@@ -18,7 +18,7 @@ import type {
 } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
-import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
+import { loadTripBundle, regenerateTravelExpenses, resolveRef, ensureNamedAdult, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
 import { fetchRoster } from "./roster.ts";
 import { parseCsv, extractSheetId, csvExportUrl, xlsxExportUrl } from "./csv.ts";
 import { parseXlsxTabs } from "./xlsx.ts";
@@ -287,10 +287,12 @@ api.delete("/trips/:id", async (c) => {
 // ---- people (local, unregistered additions only) ----
 // Registered members come from roster-db and are projected automatically; this
 // endpoint creates app-local people (e.g. a guest cub scout). A scout's parent
-// may be given as parent_id (local) or parent_ref ("id:"/"bsa:", projected).
+// may be given as parent_id (local), parent_ref ("id:"/"bsa:", projected), or
+// parent_name (free text, find-or-created as a local adult) — the last is for
+// the common case of a guest whose responsible adult isn't in roster-db at all.
 api.post("/trips/:id/people", async (c) => {
   const tripId = Number(c.req.param("id"));
-  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number; parent_ref?: string; unit_paid?: boolean }>();
+  const b = await c.req.json<{ name: string; code?: string; email?: string; type: string; parent_id?: number; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean }>();
   if (!b.name || !b.type) return c.json(bad("name and type are required"), 400);
   // A guest the unit hosts is billed to nobody, so a responsible adult would
   // never be read — don't record one and leave a stale "billed to" behind.
@@ -299,7 +301,9 @@ api.post("/trips/:id/people", async (c) => {
     ? null
     : b.parent_ref
       ? await resolveRef(c.env.DB, c.env.ROSTER, tripId, b.parent_ref)
-      : b.parent_id ?? null;
+      : b.parent_name != null
+        ? await ensureNamedAdult(c.env.DB, tripId, b.parent_name, b.parent_email)
+        : b.parent_id ?? null;
   await c.env.DB.prepare(
     "INSERT INTO people (trip_id, name, code, email, type, parent_id, source, unit_paid) VALUES (?, ?, ?, ?, ?, ?, 'local', ?)",
   )
@@ -313,13 +317,18 @@ api.post("/trips/:id/people", async (c) => {
 // apart by value — only by whether the caller sent the key at all.
 api.patch("/people/:pid", async (c) => {
   const pid = Number(c.req.param("pid"));
-  const b = await c.req.json<{ name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; unit_paid?: boolean }>();
+  const b = await c.req.json<{ name?: string; code?: string | null; email?: string | null; type?: string; parent_id?: number | null; parent_ref?: string; parent_name?: string; parent_email?: string; unit_paid?: boolean }>();
   const row = await c.env.DB.prepare("SELECT trip_id FROM people WHERE id = ?").bind(pid).first<{ trip_id: number }>();
   if (!row) return c.json(bad("person not found"), 404);
   // Same "id:"/"bsa:" ref the POST takes, so a roster adult can be named as the
   // billed-to parent here too (projected into `people` on the way through).
   const refParent = b.parent_ref
     ? await resolveRef(c.env.DB, c.env.ROSTER, row.trip_id, b.parent_ref)
+    : null;
+  // Free-text billed-to. Resolved before the SET list is built so a name that
+  // clears to blank writes NULL rather than being skipped as "not sent".
+  const namedParent = b.parent_name != null
+    ? await ensureNamedAdult(c.env.DB, row.trip_id, b.parent_name, b.parent_email)
     : null;
 
   const sets: string[] = [];
@@ -334,6 +343,7 @@ api.patch("/people/:pid", async (c) => {
   // wins over anything the same request sent for parent_id.
   if (b.unit_paid) set("parent_id", null);
   else if (b.parent_ref) set("parent_id", refParent);
+  else if (b.parent_name != null) set("parent_id", namedParent);
   else if ("parent_id" in b) set("parent_id", b.parent_id ?? null);
   if (sets.length === 0) return c.json(await bundleResponse(c.env.DB, row.trip_id));
 

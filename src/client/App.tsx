@@ -3340,6 +3340,178 @@ function matchPick(token: string, pool: PickItem[]): PickItem | null {
 }
 
 /**
+ * Text input over adult names with a suggestion menu. Fully controlled — the
+ * caller owns the text and decides what committing means.
+ *
+ * A guest's responsible adult often isn't in roster-db at all — a visiting cub
+ * scout's parent, say — so a dropdown of people we already know can't express
+ * the common case, and this accepts any name. Adults already on the trip (and
+ * roster adults) are still offered: picking one hands back the whole item, so
+ * the caller can bill to *that* person by ref and keep their roster identity
+ * and email instead of minting a same-named duplicate beside them.
+ */
+function AdultNameField({
+  value, pool, busy, ariaLabel, placeholder, onChange, onPick, onCommit, onCancel,
+}: {
+  value: string;
+  pool: PickItem[];
+  busy: boolean;
+  ariaLabel: string;
+  placeholder?: string;
+  onChange: (text: string) => void;
+  onPick: (p: PickItem) => void;
+  onCommit?: () => void;
+  onCancel?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Escape blurs and blur commits, so flag the cancel for the blur that follows.
+  const cancelled = useRef(false);
+
+  const candidates = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    if (!q) return [];
+    return pool
+      .filter((p) => p.name.toLowerCase().includes(q) || (p.email ?? "").toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 8);
+  }, [value, pool]);
+
+  return (
+    <div className="ac">
+      <input
+        value={value}
+        disabled={busy}
+        aria-label={ariaLabel}
+        placeholder={placeholder ?? "Name of the responsible adult"}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="words"
+        spellCheck={false}
+        data-1p-ignore
+        data-lpignore="true"
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => {
+          setOpen(false);
+          if (cancelled.current) { cancelled.current = false; onCancel?.(); return; }
+          onCommit?.();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); }
+          if (e.key === "Escape" && onCancel) { cancelled.current = true; e.currentTarget.blur(); }
+        }}
+      />
+      {open && candidates.length > 0 && (
+        <div className="ac-menu">
+          {candidates.map((p) => (
+            <button
+              type="button"
+              key={p.ref}
+              disabled={busy}
+              // Keep focus on the input: a blur here would commit the typed
+              // text before the click ever lands.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { setOpen(false); onPick(p); }}
+            >
+              <span>{p.name}</span>
+              <span className="hint">{p.sub}{p.email ? ` \u00b7 ${p.email}` : ""}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline text field that saves on blur or Enter and reverts on Escape, for
+ * editing one value in place inside a table row.
+ */
+function InlineText({
+  value, onSave, busy, ariaLabel, placeholder, type,
+}: {
+  value: string;
+  onSave: (next: string) => void;
+  busy: boolean;
+  ariaLabel: string;
+  placeholder?: string;
+  type?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const cancelled = useRef(false);
+  useEffect(() => setDraft(value), [value]);
+
+  return (
+    <input
+      type={type ?? "text"}
+      value={draft}
+      disabled={busy}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      autoComplete="off"
+      autoCorrect="off"
+      autoCapitalize="off"
+      spellCheck={false}
+      data-1p-ignore
+      data-lpignore="true"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        if (cancelled.current) { cancelled.current = false; setDraft(value); return; }
+        if (draft.trim() !== value.trim()) onSave(draft.trim());
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); }
+        if (e.key === "Escape") { cancelled.current = true; e.currentTarget.blur(); }
+      }}
+    />
+  );
+}
+
+/**
+ * The "Billed to" cell for one guest: edit in place, saving on blur or Enter
+ * and reverting on Escape. A name matching an adult already on the trip is
+ * saved as that person; anything else is sent as free text for the server to
+ * find-or-create as a local adult.
+ */
+function BilledToCell({
+  person, currentName, pool, run, busy,
+}: {
+  person: Person;
+  currentName: string;
+  pool: PickItem[];
+  run: TabProps["run"];
+  busy: boolean;
+}) {
+  const [draft, setDraft] = useState(currentName);
+  useEffect(() => setDraft(currentName), [currentName]);
+
+  function save(text: string, pick?: PickItem) {
+    const next = text.trim();
+    if (!pick && next === currentName.trim()) { setDraft(currentName); return; }
+    const hit = pick ?? matchPick(next, pool);
+    run(() =>
+      api.updatePerson(person.id, {
+        unit_paid: false,
+        ...(hit ? { parent_ref: hit.ref } : { parent_name: next }),
+      }),
+    );
+  }
+
+  return (
+    <AdultNameField
+      value={draft}
+      pool={pool}
+      busy={busy}
+      ariaLabel={`Who is billed for ${person.name}`}
+      onChange={setDraft}
+      onPick={(p) => { setDraft(p.name); save(p.name, p); }}
+      onCommit={() => save(draft)}
+      onCancel={() => setDraft(currentName)}
+    />
+  );
+}
+
+/**
  * Chips + autocomplete + paste UI for picking a set of people from a pool.
  * Works in "ref space": value and onChange use refs ("id:N" / "bsa:NNN"), so
  * both local people and (not-yet-projected) roster members are selectable.
@@ -3756,6 +3928,7 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
 // The registered roster is read from roster-db (read-only). Only unregistered
 // additions (guests) are stored locally and can be added/removed here.
 function Roster({ bundle, roster, run, busy }: TabProps) {
+  const { personById } = useMaps(bundle);
   const adultPool = useMemo(() => buildPool(bundle, roster, "adults"), [bundle, roster]);
 
   const regAdults = roster.filter((m) => m.type === "adult");
@@ -3766,23 +3939,46 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
 
   const [name, setName] = useState("");
   const [type, setType] = useState("scout");
-  const [parentRef, setParentRef] = useState<string>("");
+  // Free text: the responsible adult is often someone outside the roster.
+  const [billedTo, setBilledTo] = useState("");
+  const [email, setEmail] = useState("");
   // "The troop is hosting this one": their share is still counted, but it's
   // charged to the unit instead of to a family. See migration 0008.
   const [unitPaid, setUnitPaid] = useState(false);
 
-  const effectiveParent = parentRef || adultPool[0]?.ref || "";
+  const typedParent = billedTo.trim();
+  const parentHit = matchPick(typedParent, adultPool);
+  // Who this guest's cost will actually be billed to, and whether we already
+  // know how to reach them. Roster people arrive with an address; anyone we're
+  // about to invent does not, and a paysheet row we can't email is a row the
+  // treasurer has to chase by hand.
+  const needsEmail = unitPaid
+    ? false
+    : type === "adult"
+      ? true // a guest adult is billed to themselves, and is never from roster-db
+      : !!typedParent && !parentHit;
 
   function add() {
     if (!name.trim()) return;
+    const mail = email.trim() || undefined;
     run(() =>
       api.addPerson(bundle.trip.id, {
         name: name.trim(),
         type,
-        parent_ref: type === "scout" && !unitPaid ? effectiveParent : undefined,
+        // The guest's own address only means anything when they're the one
+        // being billed; a youth's notices go to their responsible adult.
+        ...(needsEmail && type === "adult" ? { email: mail } : {}),
+        // An exact match bills to that existing person (keeping their roster
+        // identity); anything else is created as a local adult by that name,
+        // carrying the address typed alongside it.
+        ...(type === "scout" && !unitPaid && typedParent
+          ? parentHit
+            ? { parent_ref: parentHit.ref }
+            : { parent_name: typedParent, parent_email: mail }
+          : {}),
         unit_paid: unitPaid,
       }),
-    ).then(() => { setName(""); setUnitPaid(false); });
+    ).then(() => { setName(""); setBilledTo(""); setEmail(""); setUnitPaid(false); });
   }
 
   const unitCovered = bundle.paysheet.totalUnitCovered ?? 0;
@@ -3808,10 +4004,26 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
           </select>
         </label>
         {type === "scout" && !unitPaid && (
-          <label className="fld" style={{ minWidth: 180 }}>Billed to
-            <select value={effectiveParent} onChange={(e) => setParentRef(e.target.value)}>
-              {adultPool.map((p) => <option key={p.ref} value={p.ref}>{p.name}</option>)}
-            </select>
+          <label className="fld" style={{ minWidth: 220 }}>Billed to
+            <AdultNameField
+              value={billedTo}
+              pool={adultPool}
+              busy={busy}
+              ariaLabel="Billed to"
+              onChange={setBilledTo}
+              onPick={(p) => setBilledTo(p.name)}
+            />
+          </label>
+        )}
+        {needsEmail && (
+          <label className="fld" style={{ minWidth: 200 }}>
+            {type === "adult" ? "Email" : `Email for ${typedParent}`}
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="optional — to email them a notice"
+            />
           </label>
         )}
         <label className="row" style={{ alignItems: "center", gap: 6, alignSelf: "flex-end", paddingBottom: 8 }}>
@@ -3821,51 +4033,67 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
         <button className="btn" disabled={busy || !name.trim()} onClick={add}>Add guest</button>
       </div>
       <p style={{ margin: "-8px 0 16px" }}><small className="hint">
-        <strong>Paid by the unit</strong> hosts the guest: they still count as a share wherever they
-        attend, so nobody else's per-share moves — the troop picks up their cut instead of a family.
+        <strong>Billed to</strong> takes any name — a visiting cub's parent usually isn't in
+        roster-db. Typing someone already on the trip bills to them; a new name is added as a
+        local adult, who then shows up on the Reimbursement tab owing that share — give them an
+        email there and their notice can be sent from the app instead of chased by hand.{" "}
+        <strong>Paid by the unit</strong> instead hosts the guest: they still count as a share
+        wherever they attend, so nobody else's per-share moves — the troop picks up their cut.
         {unitCovered > 0 && <> This trip's guests cost the unit <strong>{money(unitCovered)}</strong> so far.</>}
       </small></p>
 
       {guests.length > 0 && (
         <table style={{ marginBottom: 18 }}>
           <thead>
-            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th></th></tr>
+            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th>Email</th><th className="unit-col">Unit pays</th><th></th></tr>
           </thead>
           <tbody>
             {guests.map((p) => (
               <tr key={p.id}>
                 <td>
                   {p.name} <span className="pill">guest</span>
-                  {p.unit_paid && <> <span className="pill">unit pays</span></>}
                 </td>
                 <td className="hint">{p.type === "scout" ? "youth" : "adult"}</td>
                 <td>
-                  <select
-                    aria-label={`Who is billed for ${p.name}`}
+                  {p.unit_paid ? (
+                    <span className="hint">the unit</span>
+                  ) : p.type === "adult" ? (
+                    <span className="hint">{p.name} (themselves)</span>
+                  ) : (
+                    <BilledToCell
+                      person={p}
+                      currentName={p.parent_id != null ? personById.get(p.parent_id)?.name ?? "" : ""}
+                      pool={adultPool}
+                      run={run}
+                      busy={busy}
+                    />
+                  )}
+                </td>
+                {/* Only whoever is billed needs an address: a youth's notice
+                    goes to their responsible adult, who has their own row here
+                    (or a roster entry that already carries one). */}
+                <td>
+                  {p.type === "adult" && !p.unit_paid ? (
+                    <InlineText
+                      value={p.email ?? ""}
+                      busy={busy}
+                      type="email"
+                      ariaLabel={`Email for ${p.name}`}
+                      placeholder="none on file"
+                      onSave={(next) => run(() => api.updatePerson(p.id, { email: next || null }))}
+                    />
+                  ) : (
+                    <span className="hint">—</span>
+                  )}
+                </td>
+                <td className="unit-col">
+                  <input
+                    type="checkbox"
+                    aria-label={`The unit pays for ${p.name}`}
                     disabled={busy}
-                    value={p.unit_paid ? "unit" : p.type === "adult" ? "self" : p.parent_id ? `id:${p.parent_id}` : ""}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      run(() =>
-                        api.updatePerson(
-                          p.id,
-                          v === "unit"
-                            ? { unit_paid: true }
-                            : v === "self"
-                              ? { unit_paid: false }
-                              : { unit_paid: false, parent_ref: v },
-                        ),
-                      );
-                    }}
-                  >
-                    <option value="unit">The unit (troop pays)</option>
-                    {p.type === "adult"
-                      ? <option value="self">{p.name} (themselves)</option>
-                      : adultPool.map((a) => <option key={a.ref} value={a.ref}>{a.name}</option>)}
-                    {p.type === "scout" && !p.unit_paid && p.parent_id == null && (
-                      <option value="">— no responsible adult —</option>
-                    )}
-                  </select>
+                    checked={!!p.unit_paid}
+                    onChange={(e) => run(() => api.updatePerson(p.id, { unit_paid: e.target.checked }))}
+                  />
                 </td>
                 <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
               </tr>

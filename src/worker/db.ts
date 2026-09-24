@@ -205,6 +205,67 @@ export async function ensureLocalPerson(
 }
 
 /**
+ * Find-or-create, by name, the adult a guest is billed to.
+ *
+ * The responsible adult for a guest frequently isn't in roster-db at all — a
+ * visiting cub scout's parent, say — so there's no ref to resolve and no
+ * roster row to project. The UI takes a free-text name and this turns it into
+ * the billable person the paysheet needs: shares have to land on a real
+ * people.id or deriveShares() drops them and the group's cost quietly re-splits
+ * across everyone else.
+ *
+ * Matching an adult already on the trip matters as much as creating one. A
+ * second "Kerry McGuire" row would split her shares across two paysheet lines,
+ * and neither line would equal what she actually owes. Names are compared
+ * case-insensitively with surrounding and repeated whitespace collapsed, since
+ * this is hand-typed.
+ *
+ * Returns null for a blank name — the caller stores that as "no responsible
+ * adult", which the UI already flags on the attendance list.
+ *
+ * `email` is what the notice mailer needs to reach them; without one their
+ * paysheet row can only be read off the screen (sending 422s with "no email
+ * address on file"). It's applied on creation, and to a match only when that
+ * person has none — a roster member's own address is the better one and must
+ * not be overwritten by something hand-typed here.
+ */
+export async function ensureNamedAdult(
+  db: D1Database,
+  tripId: number,
+  rawName: string,
+  email?: string | null,
+): Promise<number | null> {
+  const name = rawName.trim().replace(/\s+/g, " ");
+  if (!name) return null;
+  const mail = email?.trim() || null;
+
+  const existing = await db
+    .prepare(
+      `SELECT id, email FROM people
+        WHERE trip_id = ? AND type = 'adult'
+          AND lower(replace(replace(trim(name), '  ', ' '), '  ', ' ')) = lower(?)
+        ORDER BY id LIMIT 1`,
+    )
+    .bind(tripId, name)
+    .first<{ id: number; email: string | null }>();
+  if (existing) {
+    if (mail && !existing.email?.trim()) {
+      await db.prepare("UPDATE people SET email = ? WHERE id = ?").bind(mail, existing.id).run();
+    }
+    return existing.id;
+  }
+
+  const inserted = await db
+    .prepare(
+      "INSERT INTO people (trip_id, name, email, type, source) VALUES (?, ?, ?, 'adult', 'local') RETURNING id",
+    )
+    .bind(tripId, name, mail)
+    .first<{ id: number }>();
+  if (!inserted) throw new Error(`failed to create billed-to adult "${name}"`);
+  return inserted.id;
+}
+
+/**
  * Resolve a person reference to a local people.id.
  *   "id:123"        -> existing local person 123
  *   "bsa:14140573"  -> roster member, projected in if needed
