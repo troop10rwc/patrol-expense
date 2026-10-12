@@ -3031,6 +3031,7 @@ function Travel({ bundle, roster, run, busy }: TabProps) {
       <p><small className="hint">
         Each driver is reimbursed (round-trip miles × rate) + tolls. The total is charged
         as expenses to the chosen cost group and flows into the paysheet automatically.
+        Click a route's name to rename it.
       </small></p>
       {travelGroups.map((g) => (
         <TravelGroup key={g.id} group={g} bundle={bundle} roster={roster} run={run} busy={busy} />
@@ -3156,7 +3157,6 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
     lastSaved.current = s;
     run(() =>
       api.updateGroup(group.id, {
-        name: group.name,
         origin: d.origin,
         destination: d.destination,
         one_way_miles: oneWay ?? (d.round_trip_miles ? Math.round((d.round_trip_miles / 2) * 10) / 10 : null),
@@ -3189,7 +3189,7 @@ function TravelGroup({ group, bundle, roster, run, busy }: { group: CostGroup } 
   return (
     <div style={{ borderTop: "1px solid var(--line)", paddingTop: 14, marginTop: 14 }}>
       <div className="toolbar" style={{ marginBottom: 8 }}>
-        <h3 style={{ margin: 0 }}>{group.name}</h3>
+        <GroupNameInput group={group} run={run} busy={busy} />
         <div className="spacer" />
         <button className="btn danger" disabled={busy} onClick={() => run(() => api.deleteGroup(group.id))}>Delete route</button>
       </div>
