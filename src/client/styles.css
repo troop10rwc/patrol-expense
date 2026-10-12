@@ -91,7 +91,6 @@ a.back-link:hover { color: var(--t10-pine); }
 }
 .tabs button:hover { color: var(--t10-ink); }
 .tabs button.active { color: var(--t10-pine-deep); border-bottom-color: var(--t10-clay); }
-.tabs button.tab-gear { font-size: 16px; padding: 7px 11px; line-height: 1; }
 
 /* ------------------------------------------------------------------- Cards */
 .card {

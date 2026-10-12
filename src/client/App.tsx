@@ -35,7 +35,7 @@ const labels: Record<Tab, string> = {
   travel: "Travel",
   expenses: "Expenses",
   reimbursement: "Reimbursement",
-  settings: "⚙",
+  settings: "Settings",
 };
 const UUID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
@@ -1053,10 +1053,8 @@ function TripView({ uuid }: { uuid: string }) {
         {TAB_ORDER.map((x) => (
           <button
             key={x}
-            className={`${tab === x ? "active" : ""} ${x === "settings" ? "tab-gear" : ""}`}
+            className={tab === x ? "active" : ""}
             onClick={() => setTab(x)}
-            aria-label={x === "settings" ? "Settings" : undefined}
-            title={x === "settings" ? "Settings" : undefined}
           >
             {labels[x]}
           </button>
@@ -1313,7 +1311,7 @@ function Ledger({
                 <Fig
                   k="Covered by the unit"
                   v={unit}
-                  title="Shares belonging to attendees the troop is hosting (marked “paid by the unit” on the ⚙ tab). They still count toward each group's split, but they're billed to nobody."
+                  title="Shares belonging to attendees the troop is hosting (marked “paid by the unit” on the Settings tab). They still count toward each group's split, but they're billed to nobody."
                 />
               </div>
             </>
@@ -1834,7 +1832,7 @@ function NoticeModal({
         {owes && notice && !notice.paymentInstructions && (
           <p className="hint warn-note">
             No payment instructions set for this trip, so the email just asks them to reply for
-            details. Add them under ⚙ Settings to include them here.
+            details. Add them under Settings to include them here.
           </p>
         )}
 
