@@ -73,6 +73,7 @@ export const api = {
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),
   getTripByUuid: (uuid: string) => req<TripBundle>(`/api/by-uuid/${uuid}`),
   getRoster: (tripId: number) => req<RosterMember[]>(`/api/trips/${tripId}/roster`),
+  getRosterUnits: () => req<string[]>("/api/roster/units"),
   seed: () => req<TripBundle>("/api/seed", { method: "POST" }),
 
   createTrip: (body: { name: string; trip_date?: string | null; slack_url?: string | null }) =>

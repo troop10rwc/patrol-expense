@@ -167,6 +167,32 @@ label.fld {
 label.fld input, label.fld select { font: inherit; font-family: var(--t10-font-body); font-size: var(--t10-fs-sm); font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--t10-ink); }
 
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+/* Top-align when a field carries a hint below it, so the hint doesn't push its
+   neighbours' inputs out of line. */
+.row.row-top { align-items: flex-start; }
+/* Native date pickers render taller than text inputs (WebKit pads the inner
+   editor); flatten them so they line up with their neighbours. */
+input[type="date"] { -webkit-appearance: none; appearance: none; line-height: normal; }
+input[type="date"]::-webkit-datetime-edit,
+input[type="date"]::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+input[type="date"]::-webkit-date-and-time-value { text-align: left; min-height: 0; }
+
+/* Labelled multi-select of toggle buttons (Settings → roster units). */
+.fld-group { display: flex; flex-direction: column; gap: 5px; }
+.fld-label {
+  font-family: var(--t10-font-display); font-size: 9.5px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--t10-ink-faint);
+}
+.unit-toggles { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 34px; }
+.unit-toggle {
+  font: inherit; font-size: var(--t10-fs-sm); padding: 6px 12px; border-radius: 20px; cursor: pointer;
+  border: 1px solid var(--t10-line); background: var(--t10-surface); color: var(--t10-ink-soft);
+}
+.unit-toggle:hover { background: var(--t10-surface-3); }
+.unit-toggle.on { background: var(--t10-pine-tint); color: var(--t10-pine-deep); border-color: var(--t10-pine); }
+.unit-toggle.on::before { content: "✓ "; }
+.unit-toggle:disabled { opacity: .5; cursor: default; }
+.unit-toggle:focus-visible { outline: none; box-shadow: var(--t10-ring); }
 .spacer { flex: 1; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 

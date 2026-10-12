@@ -83,6 +83,18 @@ function placeholders(n: number): string {
   return Array.from({ length: n }, () => "?").join(", ");
 }
 
+/** Every unit name roster-db knows about (from either membership table), sorted. */
+export async function fetchUnitNames(roster: D1Database): Promise<string[]> {
+  const res = await roster
+    .prepare(
+      `SELECT unit_name FROM unit_adult_members
+       UNION SELECT unit_name FROM unit_youth_members
+       ORDER BY unit_name`,
+    )
+    .all<{ unit_name: string }>();
+  return res.results.map((r) => r.unit_name).filter(Boolean);
+}
+
 /** All adults + youth belonging to any of the given units, de-duplicated. */
 export async function fetchRoster(roster: D1Database, units: string[]): Promise<RosterMember[]> {
   if (units.length === 0) return [];

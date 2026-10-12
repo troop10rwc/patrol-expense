@@ -3644,7 +3644,8 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
   const [pdoc, setPdoc] = useState(trip.planning_doc_url ?? "");
   const [slack, setSlack] = useState(trip.slack_url ?? "");
   const [rate, setRate] = useState(String(trip.mileage_rate));
-  const [units, setUnits] = useState(trip.roster_units.join(", "));
+  const [unitOptions, setUnitOptions] = useState<string[] | null>(null);
+  const [unitsError, setUnitsError] = useState<string | null>(null);
   const [pay, setPay] = useState(trip.payment_instructions ?? "");
 
   useEffect(() => {
@@ -3653,9 +3654,25 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
     setPdoc(trip.planning_doc_url ?? "");
     setSlack(trip.slack_url ?? "");
     setRate(String(trip.mileage_rate));
-    setUnits(trip.roster_units.join(", "));
     setPay(trip.payment_instructions ?? "");
-  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate, trip.roster_units.join(","), trip.payment_instructions]);
+  }, [trip.id, trip.slug, trip.trip_date, trip.planning_doc_url, trip.slack_url, trip.mileage_rate, trip.payment_instructions]);
+
+  useEffect(() => {
+    api.getRosterUnits().then(setUnitOptions, (e) => setUnitsError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  // A unit already saved on the trip stays listed even if roster-db no longer
+  // has it, so it can still be switched off.
+  const unitChoices = useMemo(
+    () => [...new Set([...(unitOptions ?? []), ...trip.roster_units])].sort((a, b) => a.localeCompare(b)),
+    [unitOptions, trip.roster_units.join(",")],
+  );
+
+  function toggleUnit(u: string) {
+    const on = trip.roster_units.includes(u);
+    const next = on ? trip.roster_units.filter((x) => x !== u) : [...trip.roster_units, u];
+    save({ roster_units: next });
+  }
 
   function save(patch: Record<string, unknown>) {
     run(() => api.updateTrip(trip.id, patch));
@@ -3664,7 +3681,7 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
   return (
     <div className="card">
       <h2>Sheet settings</h2>
-      <div className="row" style={{ marginBottom: 10 }}>
+      <div className="row row-top" style={{ marginBottom: 10 }}>
         <label className="fld" style={{ flex: 1, minWidth: 240 }}>URL slug
           <input
             value={slug}
@@ -3716,19 +3733,30 @@ function SheetSettings({ bundle, run, busy }: TabProps) {
             onBlur={() => slack !== (trip.slack_url ?? "") && save({ slack_url: slack || null })}
           />
         </label>
-        <label className="fld" style={{ flex: 1, minWidth: 220 }}>Roster units (from roster-db)
-          <input
-            value={units}
-            disabled={busy}
-            placeholder="Troop 10 F, Crew 10"
-            onChange={(e) => setUnits(e.target.value)}
-            onBlur={() => {
-              const next = units.split(",").map((s) => s.trim()).filter(Boolean);
-              if (next.join(",") !== trip.roster_units.join(",")) save({ roster_units: next });
-            }}
-          />
-          <small className="hint">Comma-separated; which units populate the picker.</small>
-        </label>
+      </div>
+      <div className="fld-group" role="group" aria-labelledby="roster-units-label" style={{ marginTop: 10 }}>
+        <span className="fld-label" id="roster-units-label">Roster units (from roster-db)</span>
+        <div className="unit-toggles">
+          {unitChoices.map((u) => {
+            const on = trip.roster_units.includes(u);
+            return (
+              <button
+                key={u}
+                type="button"
+                className={`unit-toggle${on ? " on" : ""}`}
+                aria-pressed={on}
+                disabled={busy}
+                onClick={() => toggleUnit(u)}
+              >
+                {u}
+              </button>
+            );
+          })}
+          {unitOptions === null && !unitsError && <span className="hint">Loading units…</span>}
+        </div>
+        <small className="hint">
+          {unitsError ? `Couldn't load units from roster-db: ${unitsError}` : "Members of the selected units populate the picker."}
+        </small>
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         <label className="fld" style={{ flex: 1 }}>How to pay the troop

@@ -19,7 +19,7 @@ import type {
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
 import { loadTripBundle, regenerateTravelExpenses, resolveRef, normalizeTrip, scaffoldDefaultGroups, ensureLocalPerson } from "./db.ts";
-import { fetchRoster } from "./roster.ts";
+import { fetchRoster, fetchUnitNames } from "./roster.ts";
 import { parseCsv, extractSheetId, csvExportUrl, xlsxExportUrl } from "./csv.ts";
 import { parseXlsxTabs } from "./xlsx.ts";
 import { buildPreview } from "./import.ts";
@@ -202,6 +202,9 @@ api.get("/trips/:id/roster", async (c) => {
   const members = await fetchRoster(c.env.ROSTER, trip.roster_units);
   return c.json(members);
 });
+
+// Unit names in roster-db, for the Settings tab's roster-unit picker.
+api.get("/roster/units", async (c) => c.json(await fetchUnitNames(c.env.ROSTER)));
 
 api.post("/trips", async (c) => {
   const b = await c.req.json<Partial<Trip>>();
