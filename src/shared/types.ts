@@ -687,6 +687,13 @@ export interface Household {
   payerSource: "designated" | "default";
 }
 
+/** The Family statements index as one viewer sees it. */
+export interface HouseholdList {
+  /** True for key 3, Key 3 Delegates and the treasurer; everyone else gets only their own household(s). */
+  canSeeAll: boolean;
+  households: HouseholdSummary[];
+}
+
 /** One row on the Family statements index. Live figures only (no snapshot history). */
 export interface HouseholdSummary {
   household: Household;
@@ -713,6 +720,8 @@ export interface FamilyEvent extends Omit<StatementEvent, "person_id"> {
 
 export interface FamilyStatement {
   household: Household;
+  /** Whether this viewer may change the payer (key 3, Key 3 Delegates, treasurer). */
+  canDesignate: boolean;
   events: FamilyEvent[];
   unitExpenses: (StatementUnitExpense & { payee: string })[];
   unitOutstanding: number;

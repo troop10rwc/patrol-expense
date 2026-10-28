@@ -27,7 +27,15 @@ import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
 import { buildStatement } from "./statement.ts";
-import { buildFamilyStatement, findHousehold, listHouseholdSummaries, setHouseholdPayer } from "./household.ts";
+import {
+  buildFamilyStatement,
+  canSeeHousehold,
+  findHousehold,
+  householdAccess,
+  listHouseholdSummaries,
+  setHouseholdPayer,
+  type HouseholdAccess,
+} from "./household.ts";
 import { buildNotice, buildPublicStatement, newLinkToken } from "./notice.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { sendNotice, sendUnitNotice, worthSending } from "./mail.ts";
@@ -212,20 +220,41 @@ api.get("/roster/units", async (c) => c.json(await fetchUnitNames(c.env.ROSTER))
 // ---- households (family statements) ----
 // Derived live from roster-db relationships (see household.ts). Read-only over
 // the trips: the only write is which guardian settles up for the household.
+//
+// Scoped per viewer: a member sees only their own household(s); the key 3, Key 3
+// Delegates and the treasurer see every household and are the only ones who can
+// change a payer. A household the viewer can't see answers 404, same as one that
+// doesn't exist, so the route doesn't confirm who's in the roster.
 
-api.get("/households", async (c) => c.json(await listHouseholdSummaries(c.env.DB, c.env.ROSTER)));
+/** The viewer's household access. DEV_AUTH_BYPASS's fixed dev user matches no
+ *  roster member, so locally it gets the treasurer's view to keep pages testable. */
+async function viewerHouseholdAccess(c: { env: Bindings; get: (k: "user") => Identity }): Promise<HouseholdAccess> {
+  if (c.env.DEV_AUTH_BYPASS === "1") return { all: true, bsas: new Set() };
+  return householdAccess(c.env.ROSTER, c.get("user").email ?? null);
+}
+
+api.get("/households", async (c) => {
+  const access = await viewerHouseholdAccess(c);
+  return c.json({
+    canSeeAll: access.all,
+    households: await listHouseholdSummaries(c.env.DB, c.env.ROSTER, access),
+  });
+});
 
 api.get("/households/:id", async (c) => {
+  const access = await viewerHouseholdAccess(c);
   const h = await findHousehold(c.env.DB, c.env.ROSTER, c.req.param("id"));
-  if (!h) return c.json(bad("household not found"), 404);
-  return c.json(await buildFamilyStatement(c.env.DB, h));
+  if (!h || !canSeeHousehold(access, h)) return c.json(bad("household not found"), 404);
+  return c.json(await buildFamilyStatement(c.env.DB, h, access.all));
 });
 
 // Designate the household's payer — the adult who pays the troop and is paid
 // back by it. `bsa_number: null` returns to the derived default.
 api.put("/households/:id/payer", async (c) => {
+  const access = await viewerHouseholdAccess(c);
   const h = await findHousehold(c.env.DB, c.env.ROSTER, c.req.param("id"));
-  if (!h) return c.json(bad("household not found"), 404);
+  if (!h || !canSeeHousehold(access, h)) return c.json(bad("household not found"), 404);
+  if (!access.all) return c.json(bad("only the key 3, a Key 3 Delegate, or the treasurer can change who pays for a household"), 403);
   const b = await c.req.json<{ bsa_number?: string | null }>();
   const bsa = b.bsa_number ?? null;
   if (bsa != null && !h.adults.some((a) => a.bsa_number === bsa)) {
@@ -233,7 +262,7 @@ api.put("/households/:id/payer", async (c) => {
   }
   await setHouseholdPayer(c.env.DB, h, bsa, c.get("user").email ?? null);
   const updated = await findHousehold(c.env.DB, c.env.ROSTER, h.id);
-  return c.json(await buildFamilyStatement(c.env.DB, updated ?? h));
+  return c.json(await buildFamilyStatement(c.env.DB, updated ?? h, true));
 });
 
 api.post("/trips", async (c) => {

@@ -26,6 +26,66 @@ import { unitStatement } from "./unit.ts";
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const EPS = 0.005;
 
+// Who may read which family statement. A household's own members (its
+// guardians and youth, matched by roster email) see their household; the key 3,
+// Key 3 Delegates and the treasurer see every household. Positions are the Scoutbook strings the
+// roster sync stores on adult_members.positions, compared case-insensitively
+// with any trailing period dropped ("Chartered Organization Rep.").
+// The key 3 are the committee chair, scoutmaster and chartered org rep; a Key 3
+// Delegate is the roster's flag for someone the key 3 have given the same reach,
+// so they count too.
+const ALL_FAMILIES_POSITIONS = new Set([
+  "committee chair",
+  "committee chairman",
+  "scoutmaster",
+  "chartered organization rep",
+  "chartered organization representative",
+  "key 3 delegate",
+  "unit treasurer",
+  "treasurer",
+]);
+const normPosition = (p: string) => p.trim().toLowerCase().replace(/\.$/, "");
+
+/** What one signed-in member may see. `all` = every household; otherwise only
+ *  households containing one of `bsas`. */
+export interface HouseholdAccess {
+  all: boolean;
+  bsas: Set<string>;
+}
+
+/** Resolve a viewer's access from their email against roster-db: adults by
+ *  `email` (whose positions may grant `all`), youth by their `emails` list. */
+export async function householdAccess(roster: D1Database, email: string | null): Promise<HouseholdAccess> {
+  const access: HouseholdAccess = { all: false, bsas: new Set() };
+  const e = email?.trim().toLowerCase();
+  if (!e) return access;
+  const adults = await roster
+    .prepare("SELECT bsa_number, positions FROM adult_members WHERE lower(email) = ?")
+    .bind(e)
+    .all<{ bsa_number: string; positions: string }>();
+  for (const a of adults.results) {
+    access.bsas.add(a.bsa_number);
+    let positions: unknown = [];
+    try { positions = JSON.parse(a.positions); } catch { /* no positions */ }
+    if (Array.isArray(positions) && positions.some((p) => typeof p === "string" && ALL_FAMILIES_POSITIONS.has(normPosition(p)))) {
+      access.all = true;
+    }
+  }
+  const youth = await roster
+    .prepare("SELECT y.bsa_number FROM youth_members y, json_each(y.emails) j WHERE lower(j.value) = ?")
+    .bind(e)
+    .all<{ bsa_number: string }>();
+  for (const y of youth.results) access.bsas.add(y.bsa_number);
+  return access;
+}
+
+/** True when the viewer may read this household's statement. */
+export function canSeeHousehold(access: HouseholdAccess, h: Household): boolean {
+  return access.all
+    || h.adults.some((a) => access.bsas.has(a.bsa_number))
+    || h.youth.some((y) => access.bsas.has(y.bsa_number));
+}
+
 /** The roster units households are drawn from: every unit any trip reads. */
 async function householdUnits(db: D1Database): Promise<string[]> {
   const { results } = await db.prepare("SELECT DISTINCT roster_units FROM trips").all<{ roster_units: string }>();
@@ -148,9 +208,15 @@ async function householdUnitExpenses(db: D1Database, h: Household) {
   return { items, outstanding: round2(outstanding) };
 }
 
-/** The Family statements index: every household with its live net. */
-export async function listHouseholdSummaries(db: D1Database, roster: D1Database): Promise<HouseholdSummary[]> {
-  const [households, bundles] = await Promise.all([loadHouseholds(db, roster), loadAllBundles(db)]);
+/** The Family statements index: every household this viewer may see, with its live net. */
+export async function listHouseholdSummaries(
+  db: D1Database,
+  roster: D1Database,
+  access: HouseholdAccess,
+): Promise<HouseholdSummary[]> {
+  const households = (await loadHouseholds(db, roster)).filter((h) => canSeeHousehold(access, h));
+  if (households.length === 0) return [];
+  const bundles = await loadAllBundles(db);
   const out: HouseholdSummary[] = [];
   for (const h of households) {
     let trips = 0;
@@ -169,7 +235,7 @@ export async function listHouseholdSummaries(db: D1Database, roster: D1Database)
 }
 
 /** One household's statement across every trip, with snapshot history. */
-export async function buildFamilyStatement(db: D1Database, h: Household): Promise<FamilyStatement> {
+export async function buildFamilyStatement(db: D1Database, h: Household, canDesignate: boolean): Promise<FamilyStatement> {
   const bundles = await loadAllBundles(db);
   const events: FamilyEvent[] = [];
   for (const b of bundles) {
@@ -205,6 +271,7 @@ export async function buildFamilyStatement(db: D1Database, h: Household): Promis
   const unit = await householdUnitExpenses(db, h);
   return {
     household: h,
+    canDesignate,
     events,
     unitExpenses: unit.items,
     unitOutstanding: unit.outstanding,

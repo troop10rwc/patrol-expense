@@ -27,7 +27,7 @@ import type {
   UnitExpenseSendSummary,
   UnitPayee,
   StatementUnitExpense,
-  HouseholdSummary,
+  HouseholdList,
   FamilyStatement,
   FamilyEvent,
 } from "../shared/types.ts";
@@ -412,14 +412,20 @@ function StatementEventCard({ ev, owner, children }: {
 // household has one adult who pays the troop and is paid back by it — derived
 // by default, designatable here. The figures are the household guardians'
 // paysheet rows summed per trip; nothing about how a trip bills changes.
+//
+// Members see only their own household(s); the key 3, Key 3 Delegates and the
+// treasurer see every one. The Worker does the scoping — this page just shows
+// what it's given.
 function FamiliesPage() {
-  const [rows, setRows] = useState<HouseholdSummary[] | null>(null);
+  const [list, setList] = useState<HouseholdList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
 
   useEffect(() => {
-    api.listHouseholds().then(setRows).catch((e) => { setError(String(e)); setRows([]); });
+    api.listHouseholds().then(setList).catch((e) => { setError(String(e)); setList({ canSeeAll: false, households: [] }); });
   }, []);
+  const rows = list?.households ?? null;
+  const all = list?.canSeeAll ?? false;
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -433,8 +439,8 @@ function FamiliesPage() {
     <div className="wrap">
       <header className="app">
         <div>
-          <h1>Family statements</h1>
-          <div className="meta"><span>Youth grouped with their guardians, from the roster</span></div>
+          <h1>{all ? "Family statements" : "Your family"}</h1>
+          <div className="meta"><span>{all ? "Youth grouped with their guardians, from the roster" : "Your household's expenses across every trip"}</span></div>
         </div>
         <div className="row"><a className="btn ghost" href={appHref("/")}>← All trips</a></div>
       </header>
@@ -442,11 +448,13 @@ function FamiliesPage() {
       {error && <div className="err">{error}</div>}
       {!rows ? <div>Loading…</div> : (
         <div className="card">
-          <div className="row" style={{ marginBottom: 10 }}>
+          {all && <div className="row" style={{ marginBottom: 10 }}>
             <input type="search" placeholder="Find a family, youth, or guardian" value={q}
               onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
-          </div>
-          {shown.length === 0 ? <p className="empty">{rows.length === 0 ? "No households in the roster units your trips use." : "No matches."}</p> : (
+          </div>}
+          {shown.length === 0 ? <p className="empty">{rows.length > 0 ? "No matches."
+            : all ? "No households in the roster units your trips use."
+            : "We couldn't match your sign-in to a youth's guardian in the roster. If that looks wrong, ask a leader to check the roster."}</p> : (
             <table className="trips">
               <thead>
                 <tr>
@@ -527,6 +535,8 @@ function FamilyStatementPage({ id }: { id: string }) {
           <label className="fld" style={{ minWidth: 240 }}>Pays &amp; receives for the household
             {h.adults.length === 0 ? (
               <span className="pill pill-warn">No guardian on file in the roster</span>
+            ) : !stmt.canDesignate ? (
+              <strong>{h.payer?.name}</strong>
             ) : (
               <select value={h.payer?.bsa_number ?? ""} disabled={busy}
                 onChange={(e) => designate(e.target.value)}>
@@ -539,9 +549,10 @@ function FamilyStatementPage({ id }: { id: string }) {
           {h.payerSource === "designated" ? (
             <>
               <span className="pill pill-new">designated</span>
-              <button className="btn ghost" disabled={busy} onClick={() => designate(null)}>Use default</button>
+              {stmt.canDesignate && <button className="btn ghost" disabled={busy} onClick={() => designate(null)}>Use default</button>}
             </>
           ) : h.payer && <span className="hint">Default: the guardian the roster lists first.</span>}
+          {!stmt.canDesignate && <span className="hint">To change who pays, ask the treasurer.</span>}
         </div>
         {h.payer && !h.payer.email && <p className="hint">{h.payer.name} has no email in the roster.</p>}
         <div className="stmt-hist">
