@@ -2,7 +2,7 @@ import type {
   Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot,
   ImportPreview, PersonStatement, PersonNotice, NoticeLink, Correction, CorrectionKind,
   CorrectionStatus, PublicStatement, NoticeSendStatus, SlackReceipt,
-  UnitExpense, UnitPayee, UnitExpenseNotice,
+  UnitExpense, UnitPayee, UnitExpenseNotice, HouseholdSummary, FamilyStatement,
 } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
@@ -69,6 +69,14 @@ export const logoutUrl = (authOrigin: string) =>
 export const api = {
   me: () => req<Me>("/api/me"),
   myStatement: () => req<PersonStatement>("/api/me/statement"),
+  // ---- households (family statements) ----
+  listHouseholds: () => req<HouseholdSummary[]>("/api/households"),
+  familyStatement: (id: string) => req<FamilyStatement>(`/api/households/${encodeURIComponent(id)}`),
+  setHouseholdPayer: (id: string, bsa_number: string | null) =>
+    req<FamilyStatement>(`/api/households/${encodeURIComponent(id)}/payer`, {
+      method: "PUT",
+      body: JSON.stringify({ bsa_number }),
+    }),
   listTrips: () => req<Trip[]>("/api/trips"),
   getSummary: () => req<TripSummary[]>("/api/summary"),
   getTrip: (id: number) => req<TripBundle>(`/api/trips/${id}`),

@@ -20,6 +20,94 @@ type SnapshotRow = { id: number; label: string | null; created_at: string; bundl
  * when `devMatchFallback` is set and nothing matched we pin to a single adult by
  * name across trips purely so the page renders against seed data.
  */
+/**
+ * One trip's figures for a set of people, summed: their live paysheet rows plus
+ * the per-snapshot history of their combined outstanding (person ids are stable
+ * within a trip, so each snapshot's frozen rows can be read the same way).
+ * Null when none of them has any financial activity on the trip.
+ *
+ * My statement passes one adult; a family statement passes a household's
+ * guardians on that trip.
+ */
+export async function eventFigures(
+  db: D1Database,
+  bundle: TripBundle,
+  personIds: number[],
+): Promise<Omit<StatementEvent, "person_id"> | null> {
+  const ids = new Set(personIds);
+  const rows = bundle.paysheet.rows.filter((r) => ids.has(r.person_id));
+  if (rows.length === 0) return null;
+  const sum = (f: (r: (typeof rows)[number]) => number) => round2(rows.reduce((s, r) => s + f(r), 0));
+  const paid = sum((r) => r.paid);
+  const owed = sum((r) => r.owed);
+  const prepay = sum((r) => r.prepay);
+  // Skip events where they have no financial activity at all.
+  if (Math.abs(paid) < EPS && Math.abs(owed) < EPS && Math.abs(prepay) < EPS) return null;
+  const outstanding = rows.length === 1 ? rows[0].outstanding : sum((r) => r.outstanding);
+  const statuses = new Set(rows.map((r) => r.status));
+
+  // Per-snapshot history, oldest -> newest.
+  const { results: snaps } = await db
+    .prepare("SELECT id, label, created_at, bundle FROM snapshots WHERE trip_id = ? ORDER BY id ASC")
+    .bind(bundle.trip.id)
+    .all<SnapshotRow>();
+
+  const history: StatementHistoryPoint[] = [];
+  let prev = 0;
+  for (const s of snaps) {
+    let snapOutstanding = 0;
+    try {
+      const sb = JSON.parse(s.bundle) as TripBundle;
+      snapOutstanding = sb.paysheet.rows.filter((r) => ids.has(r.person_id)).reduce((t, r) => t + r.outstanding, 0);
+    } catch {
+      snapOutstanding = prev; // unreadable snapshot: treat as no change
+    }
+    history.push({
+      snapshot_id: s.id,
+      label: s.label,
+      created_at: s.created_at,
+      outstanding: round2(snapOutstanding),
+      delta: round2(snapOutstanding - prev),
+    });
+    prev = snapOutstanding;
+  }
+
+  const lastSnap = history.length ? history[history.length - 1].outstanding : null;
+  const liveDelta = lastSnap === null ? round2(outstanding) : round2(outstanding - lastSnap);
+  const projected = history.length === 0 ? true : Math.abs(liveDelta) > EPS;
+
+  return {
+    trip: {
+      uuid: bundle.trip.uuid,
+      slug: bundle.trip.slug,
+      name: bundle.trip.name,
+      trip_date: bundle.trip.trip_date,
+    },
+    paid,
+    owed,
+    prepay,
+    reimbursed: sum((r) => r.reimbursed ?? 0),
+    outstanding,
+    status: statuses.size === 1 ? rows[0].status : "none",
+    projected,
+    liveDelta,
+    history,
+  };
+}
+
+/** Every trip's live bundle (small N for a troop), newest first. */
+export async function loadAllBundles(db: D1Database): Promise<TripBundle[]> {
+  const { results: tripRows } = await db
+    .prepare("SELECT id FROM trips ORDER BY id DESC")
+    .all<{ id: number }>();
+  const bundles: TripBundle[] = [];
+  for (const { id } of tripRows) {
+    const b = await loadTripBundle(db, id);
+    if (b) bundles.push(b);
+  }
+  return bundles;
+}
+
 export async function buildStatement(
   db: D1Database,
   roster: D1Database,
@@ -42,15 +130,7 @@ export async function buildStatement(
     }
   }
 
-  // Load every trip's live bundle once (small N for a troop).
-  const { results: tripRows } = await db
-    .prepare("SELECT id FROM trips ORDER BY id DESC")
-    .all<{ id: number }>();
-  const bundles: TripBundle[] = [];
-  for (const { id } of tripRows) {
-    const b = await loadTripBundle(db, id);
-    if (b) bundles.push(b);
-  }
+  const bundles = await loadAllBundles(db);
 
   // A person is "me" when they're an adult matched by email or roster bsa_number.
   let matches = (p: Person): boolean =>
@@ -76,61 +156,8 @@ export async function buildStatement(
   for (const bundle of bundles) {
     const me = bundle.people.find(matches);
     if (!me) continue;
-    const row = bundle.paysheet.rows.find((r) => r.person_id === me.id);
-    if (!row) continue;
-    // Skip events where this adult has no financial activity at all.
-    if (Math.abs(row.paid) < EPS && Math.abs(row.owed) < EPS && Math.abs(row.prepay) < EPS) continue;
-
-    // Per-snapshot history: read this person's frozen outstanding from each
-    // snapshot (person_id is stable within a trip), oldest -> newest.
-    const { results: snaps } = await db
-      .prepare("SELECT id, label, created_at, bundle FROM snapshots WHERE trip_id = ? ORDER BY id ASC")
-      .bind(bundle.trip.id)
-      .all<SnapshotRow>();
-
-    const history: StatementHistoryPoint[] = [];
-    let prev = 0;
-    for (const s of snaps) {
-      let outstanding = 0;
-      try {
-        const sb = JSON.parse(s.bundle) as TripBundle;
-        const sr = sb.paysheet.rows.find((r) => r.person_id === me.id);
-        outstanding = sr ? sr.outstanding : 0;
-      } catch {
-        outstanding = prev; // unreadable snapshot: treat as no change
-      }
-      history.push({
-        snapshot_id: s.id,
-        label: s.label,
-        created_at: s.created_at,
-        outstanding: round2(outstanding),
-        delta: round2(outstanding - prev),
-      });
-      prev = outstanding;
-    }
-
-    const lastSnap = history.length ? history[history.length - 1].outstanding : null;
-    const liveDelta = lastSnap === null ? round2(row.outstanding) : round2(row.outstanding - lastSnap);
-    const projected = history.length === 0 ? true : Math.abs(liveDelta) > EPS;
-
-    events.push({
-      trip: {
-        uuid: bundle.trip.uuid,
-        slug: bundle.trip.slug,
-        name: bundle.trip.name,
-        trip_date: bundle.trip.trip_date,
-      },
-      person_id: me.id,
-      paid: row.paid,
-      owed: row.owed,
-      prepay: row.prepay,
-      reimbursed: row.reimbursed ?? 0,
-      outstanding: row.outstanding,
-      status: row.status,
-      projected,
-      liveDelta,
-      history,
-    });
+    const ev = await eventFigures(db, bundle, [me.id]);
+    if (ev) events.push({ ...ev, person_id: me.id });
   }
 
   const unit = await unitStatement(db, unitEmail);

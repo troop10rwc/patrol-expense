@@ -651,3 +651,71 @@ export interface UnitExpenseNotice {
   html: string;
   body: string;
 }
+
+// ----- households (family statements) -----
+// Derived from roster-db relationships: each youth joined to their guardians,
+// and siblings who share a guardian joined into one household. See
+// src/worker/household.ts.
+
+/** A guardian in a household. `registered` is false when the roster names
+ *  them on a youth's relationships but they aren't a registered adult member. */
+export interface HouseholdAdult {
+  bsa_number: string;
+  name: string;
+  email: string | null;
+  registered: boolean;
+}
+
+export interface HouseholdYouth {
+  bsa_number: string;
+  name: string;
+  patrol: string | null;
+  /** This youth's guardians' bsa_numbers, first (the paysheet's billable adult) first. */
+  guardians: string[];
+}
+
+export interface Household {
+  /** Stable URL key: the lowest youth bsa_number in the household. */
+  id: string;
+  name: string; // e.g. "Rivera household"
+  adults: HouseholdAdult[];
+  youth: HouseholdYouth[];
+  /** The adult who pays the troop and receives the troop's payments. Null only
+   *  when no youth in the household has a guardian on file. */
+  payer: HouseholdAdult | null;
+  /** "designated" when a leader picked the payer; "default" when it's derived. */
+  payerSource: "designated" | "default";
+}
+
+/** One row on the Family statements index. Live figures only (no snapshot history). */
+export interface HouseholdSummary {
+  household: Household;
+  trips: number; // trips with household activity
+  outstanding: number; // live net across trips + approved unit expenses (positive => troop owes the family)
+}
+
+/** One household member's own paysheet row on a trip. */
+export interface FamilyEventMember {
+  person_id: number;
+  name: string;
+  paid: number;
+  owed: number;
+  outstanding: number;
+  status: SettlementStatus;
+}
+
+/** One trip on a family statement: the household guardians' paysheet rows summed. */
+export interface FamilyEvent extends Omit<StatementEvent, "person_id"> {
+  members: FamilyEventMember[];
+  /** The household's youth who attended this trip. */
+  youth: { name: string; billedTo: string | null; outsideHousehold: boolean }[];
+}
+
+export interface FamilyStatement {
+  household: Household;
+  events: FamilyEvent[];
+  unitExpenses: (StatementUnitExpense & { payee: string })[];
+  unitOutstanding: number;
+  totalOutstanding: number; // positive => troop owes the family
+  projected: boolean;
+}

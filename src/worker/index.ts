@@ -27,6 +27,7 @@ import { buildPreview } from "./import.ts";
 import { autocomplete, drivingMiles } from "./geo.ts";
 import { seedWinterLodge } from "./seed.ts";
 import { buildStatement } from "./statement.ts";
+import { buildFamilyStatement, findHousehold, listHouseholdSummaries, setHouseholdPayer } from "./household.ts";
 import { buildNotice, buildPublicStatement, newLinkToken } from "./notice.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
 import { sendNotice, sendUnitNotice, worthSending } from "./mail.ts";
@@ -207,6 +208,33 @@ api.get("/trips/:id/roster", async (c) => {
 
 // Unit names in roster-db, for the Settings tab's roster-unit picker.
 api.get("/roster/units", async (c) => c.json(await fetchUnitNames(c.env.ROSTER)));
+
+// ---- households (family statements) ----
+// Derived live from roster-db relationships (see household.ts). Read-only over
+// the trips: the only write is which guardian settles up for the household.
+
+api.get("/households", async (c) => c.json(await listHouseholdSummaries(c.env.DB, c.env.ROSTER)));
+
+api.get("/households/:id", async (c) => {
+  const h = await findHousehold(c.env.DB, c.env.ROSTER, c.req.param("id"));
+  if (!h) return c.json(bad("household not found"), 404);
+  return c.json(await buildFamilyStatement(c.env.DB, h));
+});
+
+// Designate the household's payer — the adult who pays the troop and is paid
+// back by it. `bsa_number: null` returns to the derived default.
+api.put("/households/:id/payer", async (c) => {
+  const h = await findHousehold(c.env.DB, c.env.ROSTER, c.req.param("id"));
+  if (!h) return c.json(bad("household not found"), 404);
+  const b = await c.req.json<{ bsa_number?: string | null }>();
+  const bsa = b.bsa_number ?? null;
+  if (bsa != null && !h.adults.some((a) => a.bsa_number === bsa)) {
+    return c.json(bad("that adult isn't a guardian in this household"), 400);
+  }
+  await setHouseholdPayer(c.env.DB, h, bsa, c.get("user").email ?? null);
+  const updated = await findHousehold(c.env.DB, c.env.ROSTER, h.id);
+  return c.json(await buildFamilyStatement(c.env.DB, updated ?? h));
+});
 
 api.post("/trips", async (c) => {
   const b = await c.req.json<Partial<Trip>>();

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ReactNode } from "react";
 import type {
   TripBundle,
   TripSummary,
@@ -27,6 +27,9 @@ import type {
   UnitExpenseSendSummary,
   UnitPayee,
   StatementUnitExpense,
+  HouseholdSummary,
+  FamilyStatement,
+  FamilyEvent,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, publicApi, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, ApiError, type Me } from "./api.ts";
@@ -55,6 +58,8 @@ function appPath(): string {
 // exists precisely so someone with no troop account — a parent emailed a link —
 // can see why they owe, so it must skip the sign-in bounce in BackOffice below.
 const PUBLIC_STATEMENT_RE = /^\/s\/([A-Za-z0-9_-]{16,64})$/;
+// A family statement, keyed by its household id (a youth's bsa_number).
+const FAMILY_RE = /^\/families\/([^/]+)$/;
 
 export function App() {
   const shared = appPath().match(PUBLIC_STATEMENT_RE);
@@ -86,9 +91,12 @@ function BackOffice() {
 
   const path = appPath();
   const m = path.slice(1).match(UUID_RE);
+  const fam = path.match(FAMILY_RE);
   const view =
     path === "/me" ? <StatementPage />
     : path === "/unit" ? <UnitExpensesPage />
+    : path === "/families" ? <FamiliesPage />
+    : fam ? <FamilyStatementPage id={decodeURIComponent(fam[1])} />
     : m ? <TripView uuid={m[1]} />
     : <IndexPage />;
   return (
@@ -151,6 +159,7 @@ function IndexPage() {
         </div>
         <div className="row">
           <a className="btn ghost" href={appHref("/me")}>My statement</a>
+          <a className="btn ghost" href={appHref("/families")}>Family statements</a>
           <a className="btn ghost" href={appHref("/unit")}>Unit expenses</a>
           <button className="btn ghost" onClick={() => setShowImport(true)}>Import from Google Sheet</button>
           <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
@@ -272,10 +281,15 @@ function signed(n: number): string {
   return `${n >= 0 ? "+" : "−"}${money(Math.abs(n))}`;
 }
 
-function StatementTotal({ stmt }: { stmt: PersonStatement }) {
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// `owner` names whose statement it is; omitted, it reads as the viewer's own.
+function StatementTotal({ stmt, owner }: { stmt: Pick<PersonStatement, "totalOutstanding" | "projected">; owner?: string }) {
   const t = stmt.totalOutstanding;
   const settled = Math.abs(t) < 0.005;
-  const label = settled ? "You're all settled" : t > 0 ? "Troop owes you" : "You owe the troop";
+  const label = owner
+    ? settled ? `${cap(owner)} is all settled` : t > 0 ? `Troop owes ${owner}` : `${cap(owner)} owes the troop`
+    : settled ? "You're all settled" : t > 0 ? "Troop owes you" : "You owe the troop";
   return (
     <div className="card stmt-total">
       <div className="stmt-total-label">
@@ -332,10 +346,14 @@ function StatementUnitCard({ stmt }: { stmt: PersonStatement }) {
   );
 }
 
-function StatementEventCard({ ev }: { ev: StatementEvent }) {
+function StatementEventCard({ ev, owner, children }: {
+  ev: Omit<StatementEvent, "person_id">;
+  owner?: string;
+  children?: ReactNode;
+}) {
   const o = ev.outstanding;
   const settled = Math.abs(o) < 0.005;
-  const dir = settled ? "Settled" : o > 0 ? "Owed to you" : "You owe";
+  const dir = settled ? "Settled" : o > 0 ? `Owed to ${owner ?? "you"}` : owner ? `${cap(owner)} owes` : "You owe";
   const showLive = ev.history.length > 0 && Math.abs(ev.liveDelta) > 0.005;
   return (
     <div className="card stmt-event">
@@ -357,6 +375,7 @@ function StatementEventCard({ ev }: { ev: StatementEvent }) {
         {ev.reimbursed ? ` · Paid back ${money(ev.reimbursed)}` : ""}
         {ev.prepay ? ` · Pre-reimbursed ${money(ev.prepay)}` : ""}
       </div>
+      {children}
 
       <div className="stmt-hist">
         {ev.history.length === 0 ? (
@@ -382,6 +401,228 @@ function StatementEventCard({ ev }: { ev: StatementEvent }) {
             <span className={`stmt-hist-delta ${ev.liveDelta < 0 ? "neg" : ""}`}>{signed(ev.liveDelta)}</span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------- Family statements
+// Youth grouped with their guardians into households, straight from the roster's
+// relationships (siblings who share a guardian are one household). Each
+// household has one adult who pays the troop and is paid back by it — derived
+// by default, designatable here. The figures are the household guardians'
+// paysheet rows summed per trip; nothing about how a trip bills changes.
+function FamiliesPage() {
+  const [rows, setRows] = useState<HouseholdSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    api.listHouseholds().then(setRows).catch((e) => { setError(String(e)); setRows([]); });
+  }, []);
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!rows || !needle) return rows ?? [];
+    return rows.filter(({ household: h }) =>
+      [h.name, ...h.youth.map((y) => y.name), ...h.adults.map((a) => a.name)].some((n) => n.toLowerCase().includes(needle)),
+    );
+  }, [rows, q]);
+
+  return (
+    <div className="wrap">
+      <header className="app">
+        <div>
+          <h1>Family statements</h1>
+          <div className="meta"><span>Youth grouped with their guardians, from the roster</span></div>
+        </div>
+        <div className="row"><a className="btn ghost" href={appHref("/")}>← All trips</a></div>
+      </header>
+
+      {error && <div className="err">{error}</div>}
+      {!rows ? <div>Loading…</div> : (
+        <div className="card">
+          <div className="row" style={{ marginBottom: 10 }}>
+            <input type="search" placeholder="Find a family, youth, or guardian" value={q}
+              onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
+          </div>
+          {shown.length === 0 ? <p className="empty">{rows.length === 0 ? "No households in the roster units your trips use." : "No matches."}</p> : (
+            <table className="trips">
+              <thead>
+                <tr>
+                  <th>Household</th>
+                  <th>Youth</th>
+                  <th>Pays &amp; receives</th>
+                  <th className="num">Trips</th>
+                  <th className="num">Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map(({ household: h, trips, outstanding }) => (
+                  <tr key={h.id}>
+                    <td><a className="trip-link" href={appHref(`/families/${encodeURIComponent(h.id)}`)}>{h.name}</a></td>
+                    <td className="hint">{h.youth.map((y) => y.name).join(", ")}</td>
+                    <td>{h.payer ? h.payer.name : <span className="pill pill-warn">no guardian on file</span>}</td>
+                    <td className="num">{trips || <span className="hint">—</span>}</td>
+                    <td className={`num ${outstanding < -0.005 ? "neg" : ""}`}>
+                      {Math.abs(outstanding) < 0.005 ? <span className="hint">settled</span>
+                        : outstanding > 0 ? `owed ${money(outstanding)}` : `owes ${money(-outstanding)}`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="hint">Net is live across every trip (including ones not yet snapshotted) plus approved unit expenses. Positive means the troop owes the family.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FamilyStatementPage({ id }: { id: string }) {
+  const [stmt, setStmt] = useState<FamilyStatement | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.familyStatement(id).then(setStmt).catch((e) => setError(String(e)));
+  }, [id]);
+
+  async function designate(bsa: string | null) {
+    setBusy(true);
+    setError(null);
+    try {
+      setStmt(await api.setHouseholdPayer(id, bsa));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!stmt)
+    return (
+      <div className="wrap">
+        {error ? <div className="err">{error}</div> : "Loading…"}
+        <p><a href={appHref("/families")}>← Family statements</a></p>
+      </div>
+    );
+
+  const h = stmt.household;
+  return (
+    <div className="wrap">
+      <header className="app">
+        <div>
+          <h1>{h.name}</h1>
+          <div className="meta"><span>{h.youth.map((y) => y.name).join(", ")}</span></div>
+        </div>
+        <div className="row"><a className="btn ghost" href={appHref("/families")}>← Family statements</a></div>
+      </header>
+
+      {error && <div className="err">{error}</div>}
+
+      <div className="card">
+        <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label className="fld" style={{ minWidth: 240 }}>Pays &amp; receives for the household
+            {h.adults.length === 0 ? (
+              <span className="pill pill-warn">No guardian on file in the roster</span>
+            ) : (
+              <select value={h.payer?.bsa_number ?? ""} disabled={busy}
+                onChange={(e) => designate(e.target.value)}>
+                {h.adults.map((a) => (
+                  <option key={a.bsa_number} value={a.bsa_number}>{a.name}{a.registered ? "" : " (not registered)"}</option>
+                ))}
+              </select>
+            )}
+          </label>
+          {h.payerSource === "designated" ? (
+            <>
+              <span className="pill pill-new">designated</span>
+              <button className="btn ghost" disabled={busy} onClick={() => designate(null)}>Use default</button>
+            </>
+          ) : h.payer && <span className="hint">Default: the guardian the roster lists first.</span>}
+        </div>
+        {h.payer && !h.payer.email && <p className="hint">{h.payer.name} has no email in the roster.</p>}
+        <div className="stmt-hist">
+          {h.youth.map((y) => (
+            <div className="stmt-hist-row" key={y.bsa_number}>
+              <span>{y.name}{y.patrol ? <span className="hint"> · {y.patrol}</span> : null}</span>
+              <span className="hint">
+                {y.guardians.length === 0 ? "no guardian on file"
+                  : y.guardians.map((g) => h.adults.find((a) => a.bsa_number === g)?.name ?? g).join(", ")}
+              </span>
+              <span />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <StatementTotal stmt={stmt} owner="the family" />
+      {stmt.unitExpenses.length > 0 && <FamilyUnitCard stmt={stmt} />}
+      {stmt.events.length === 0 && <div className="card"><p className="empty">No trip activity for this household yet.</p></div>}
+      {stmt.events.map((ev) => <FamilyEventCard key={ev.trip.uuid} ev={ev} />)}
+    </div>
+  );
+}
+
+function FamilyEventCard({ ev }: { ev: FamilyEvent }) {
+  return (
+    <StatementEventCard ev={ev} owner="the family">
+      <div className="stmt-hist">
+        {ev.members.map((m) => (
+          <div className="stmt-hist-row" key={m.person_id}>
+            <span className="stmt-hist-when">
+              {m.name}
+              <span className="hint"> · paid {money(m.paid)} · share {money(m.owed)}{m.status !== "none" ? ` · ${m.status}` : ""}</span>
+            </span>
+            <span />
+            <span className={`stmt-hist-out ${m.outstanding < 0 ? "neg" : ""}`}>{money(m.outstanding)}</span>
+          </div>
+        ))}
+        {ev.youth.map((y) => (
+          <div className="stmt-hist-row" key={y.name}>
+            <span className="stmt-hist-when">
+              {y.name}
+              <span className="hint">
+                {y.billedTo ? ` · share billed to ${y.billedTo}` : " · no responsible adult on this trip"}
+              </span>
+            </span>
+            {y.outsideHousehold
+              ? <span className="pill pill-warn" title="This youth's share is on another adult's paysheet row, so it isn't in the family's total">outside household</span>
+              : <span />}
+            <span />
+          </div>
+        ))}
+      </div>
+    </StatementEventCard>
+  );
+}
+
+/** The household guardians' non-trip reimbursements. Only approved ones count. */
+function FamilyUnitCard({ stmt }: { stmt: FamilyStatement }) {
+  const o = stmt.unitOutstanding;
+  return (
+    <div className="card stmt-event">
+      <div className="row stmt-event-head">
+        <strong style={{ fontSize: 16 }}>Unit expenses</strong>
+        <span className="hint">Reimbursements outside of trips</span>
+      </div>
+      <div className="stmt-event-amt">
+        <span className="hint">{o > 0.005 ? "Owed to the family" : "Settled"}</span>{" "}
+        <strong>{money(o)}</strong>
+      </div>
+      <div className="stmt-hist">
+        {stmt.unitExpenses.map((u) => (
+          <div className="stmt-hist-row" key={u.id}>
+            <span className="stmt-hist-when">
+              {u.description}
+              <span className="hint">{" · "}{u.payee}{" · "}{u.spent_on ?? fmtTime(u.created_at)}</span>
+            </span>
+            <span className={`pill ${u.status === "paid" ? "pill-good" : ""}`}>{u.status === "approved" ? "owed" : UNIT_STATUS_LABEL[u.status]}</span>
+            <span className="stmt-hist-out">{money(u.amount)}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
