@@ -1,4 +1,4 @@
-import type { NoticeSendStatus, PersonNotice } from "../shared/types.ts";
+import type { NoticeSendStatus, PersonNotice, UnitExpenseNotice } from "../shared/types.ts";
 
 // Sending a reimbursement notice, and folding Cloudflare's delivery events back
 // into a status the Reimbursement tab can render.
@@ -177,3 +177,62 @@ export async function sendNotice(
 
 /** A notice with no balance either way has nothing to tell anyone. */
 export const worthSending = (notice: PersonNotice): boolean => Math.abs(notice.net) > EPS;
+
+/**
+ * Send the email about one unit expense and record the attempt in
+ * unit_expense_sends — the same write-before-send, record-the-failure shape as
+ * `sendNotice` above, so delivery events fold into it the same way.
+ *
+ * Replies go to MAIL_FALLBACK (the treasurer) rather than the corrections queue:
+ * corrections are scoped to a trip snapshot, and a unit expense has neither.
+ */
+export async function sendUnitNotice(
+  env: MailBindings,
+  unitExpenseId: number,
+  notice: UnitExpenseNotice,
+  amount: number,
+  sentBy: string,
+): Promise<SendOutcome> {
+  const to = (notice.to ?? "").trim();
+  if (!to) throw new Error("no email address on file for that person");
+  const from = env.MAIL_FROM;
+  if (!from) throw new Error("MAIL_FROM is not configured");
+  const replyTo = env.MAIL_FALLBACK ?? null;
+
+  const inserted = await env.DB.prepare(
+    `INSERT INTO unit_expense_sends
+       (unit_expense_id, kind, to_email, reply_to, subject, amount, sent_by, status_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     RETURNING id`,
+  )
+    .bind(unitExpenseId, notice.kind, to, replyTo ?? from, notice.subject, amount, sentBy)
+    .first<{ id: number }>();
+  if (!inserted) throw new Error("could not record the send");
+  const id = inserted.id;
+
+  try {
+    const res = await env.EMAIL.send({
+      to,
+      from: { email: from, name: env.MAIL_FROM_NAME ?? "Troop 10" },
+      ...(replyTo ? { replyTo } : {}),
+      subject: notice.subject,
+      html: notice.html,
+      text: notice.body,
+    });
+    await env.DB.prepare(
+      "UPDATE unit_expense_sends SET message_id = ?, status = 'sent', status_at = datetime('now') WHERE id = ?",
+    )
+      .bind(res.messageId, id)
+      .run();
+    return { id, status: "sent", error_code: null, error_detail: null };
+  } catch (e) {
+    const code = errorCode(e);
+    const detail = e instanceof Error ? e.message : String(e);
+    await env.DB.prepare(
+      "UPDATE unit_expense_sends SET status = 'failed', error_code = ?, error_detail = ?, status_at = datetime('now') WHERE id = ?",
+    )
+      .bind(code, detail.slice(0, 500), id)
+      .run();
+    return { id, status: "failed", error_code: code, error_detail: explainSendError(code, detail) };
+  }
+}

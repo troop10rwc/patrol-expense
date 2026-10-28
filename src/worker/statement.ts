@@ -1,5 +1,6 @@
 import type { Person, PersonStatement, StatementEvent, StatementHistoryPoint, TripBundle } from "../shared/types.ts";
 import { loadTripBundle } from "./db.ts";
+import { unitStatement } from "./unit.ts";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const EPS = 0.005;
@@ -57,12 +58,17 @@ export async function buildStatement(
     ((email != null && p.email != null && p.email.toLowerCase() === email) ||
       (p.bsa_number != null && bsaSet.has(p.bsa_number)));
 
+  // Unit expenses are keyed by email alone — they belong to a member, not to a
+  // person row on some trip.
+  let unitEmail = email;
+
   // Dev-only fallback so the page is testable behind DEV_AUTH_BYPASS.
   if (devMatchFallback && !bundles.some((b) => b.people.some(matches))) {
     const sample = bundles.flatMap((b) => b.people).find((p) => p.type === "adult");
     if (sample) {
       const name = sample.name;
       matches = (p: Person): boolean => p.type === "adult" && p.name === name;
+      unitEmail = sample.email ?? unitEmail;
     }
   }
 
@@ -127,10 +133,13 @@ export async function buildStatement(
     });
   }
 
-  const totalOutstanding = round2(events.reduce((s, e) => s + e.outstanding, 0));
+  const unit = await unitStatement(db, unitEmail);
+  const totalOutstanding = round2(events.reduce((s, e) => s + e.outstanding, 0) + unit.outstanding);
   return {
-    person: { email: identity.email, name: identity.name, matched: events.length > 0 },
+    person: { email: identity.email, name: identity.name, matched: events.length > 0 || unit.items.length > 0 },
     events,
+    unitExpenses: unit.items,
+    unitOutstanding: unit.outstanding,
     totalOutstanding,
     projected: events.some((e) => e.projected),
   };

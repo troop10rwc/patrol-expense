@@ -46,9 +46,12 @@ export interface SlackBindings {
   SLACK_BOT_TOKEN?: string;
 }
 
-/** Shortcut callback_id, as configured in the Slack app's Interactivity setup. */
+/** Shortcut callback_ids, as configured in the Slack app's Interactivity setup. */
 export const SHORTCUT_CALLBACK_ID = "attach_receipt";
 const VIEW_CALLBACK_ID = "attach_receipt_modal";
+/** "Add as unit expense" — a non-trip reimbursement, typically run in #treasurer. */
+export const UNIT_SHORTCUT_CALLBACK_ID = "add_unit_expense";
+const UNIT_VIEW_CALLBACK_ID = "unit_expense_modal";
 
 /** One message rarely carries more; past this it's an album, not a receipt. */
 const MAX_SLACK_FILES = 5;
@@ -565,20 +568,18 @@ async function onViewSubmission(
 }
 
 /**
- * Copy the tagged files out of Slack into R2 and record them.
+ * Copy a tagged message's files out of Slack into R2 under `prefix`, calling
+ * `record` for each one that lands. Returns how many did.
  *
- * A queued receipt with no photo is worse than no queued receipt — the treasurer
- * would see an amount with nothing to check it against — so if not one file
- * survives, the row is removed and the failure is said out loud in the thread
- * rather than left to be discovered at review time.
+ * Shared by both shortcuts: the receipt queue and unit expenses store into
+ * different tables, but the download rules are the same.
  */
-async function storeSlackFiles(
+async function copySlackFiles(
   env: SlackBindings,
-  receiptId: number,
-  tripId: number,
   meta: ViewMeta,
-  summary: { amount: number; description: string; groupName: string },
-): Promise<void> {
+  prefix: string,
+  record: (key: string, filename: string, f: ViewMeta["files"][number], size: number) => Promise<unknown>,
+): Promise<number> {
   let stored = 0;
   for (const f of meta.files) {
     // private_metadata was written by `usableFiles` and can't be edited without
@@ -598,20 +599,41 @@ async function storeSlackFiles(
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_ATTACHMENT_BYTES) continue;
 
       const filename = safeFilename(f.name);
-      const key = `trip/${tripId}/slack/${receiptId}/${crypto.randomUUID()}-${filename}`;
+      const key = `${prefix}/${crypto.randomUUID()}-${filename}`;
       // Object first, so a committed row always points at real bytes.
       await env.RECEIPTS.put(key, bytes, { httpMetadata: { contentType: f.mimetype } });
-      await env.DB.prepare(
-        `INSERT INTO slack_receipt_files (receipt_id, trip_id, r2_key, filename, content_type, size, slack_file_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-        .bind(receiptId, tripId, key, filename, f.mimetype, bytes.byteLength, f.id || null)
-        .run();
+      await record(key, filename, f, bytes.byteLength);
       stored++;
     } catch (e) {
       console.error("slack file copy failed", e);
     }
   }
+  return stored;
+}
+
+/**
+ * Copy the tagged files out of Slack into R2 and record them.
+ *
+ * A queued receipt with no photo is worse than no queued receipt — the treasurer
+ * would see an amount with nothing to check it against — so if not one file
+ * survives, the row is removed and the failure is said out loud in the thread
+ * rather than left to be discovered at review time.
+ */
+async function storeSlackFiles(
+  env: SlackBindings,
+  receiptId: number,
+  tripId: number,
+  meta: ViewMeta,
+  summary: { amount: number; description: string; groupName: string },
+): Promise<void> {
+  const stored = await copySlackFiles(env, meta, `trip/${tripId}/slack/${receiptId}`, (key, filename, f, size) =>
+    env.DB.prepare(
+      `INSERT INTO slack_receipt_files (receipt_id, trip_id, r2_key, filename, content_type, size, slack_file_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(receiptId, tripId, key, filename, f.mimetype, size, f.id || null)
+      .run(),
+  );
 
   if (stored === 0) {
     await env.DB.prepare("DELETE FROM slack_receipts WHERE id = ?").bind(receiptId).run();
@@ -653,8 +675,8 @@ export async function handleSlackInteraction(
 
   switch (payload?.type) {
     case "message_action":
-      if (payload.callback_id !== SHORTCUT_CALLBACK_ID) return null;
-      await onMessageAction(env, payload);
+      if (payload.callback_id === SHORTCUT_CALLBACK_ID) await onMessageAction(env, payload);
+      else if (payload.callback_id === UNIT_SHORTCUT_CALLBACK_ID) await onUnitMessageAction(env, payload);
       return null;
 
     case "block_actions":
@@ -662,8 +684,9 @@ export async function handleSlackInteraction(
       return null;
 
     case "view_submission":
-      if (payload.view?.callback_id !== VIEW_CALLBACK_ID) return null;
-      return onViewSubmission(env, payload, ctx);
+      if (payload.view?.callback_id === VIEW_CALLBACK_ID) return onViewSubmission(env, payload, ctx);
+      if (payload.view?.callback_id === UNIT_VIEW_CALLBACK_ID) return onUnitViewSubmission(env, payload, ctx);
+      return null;
 
     default:
       return null;
@@ -685,4 +708,230 @@ export async function notifyReviewed(
       ? `✅ *${receipt.description}* (${money(receipt.amount)}) is on the expense report.`
       : `🚫 *${receipt.description}* (${money(receipt.amount)}) wasn't added${note ? `: ${note}` : "."}`;
   await postThreadReply(env, receipt.slack_channel_id, receipt.slack_message_ts, text);
+}
+
+// ------------------------------------------------------------ unit expenses
+//
+// "Add as unit expense": the same move as "Attach to expense report", for money
+// that isn't tied to a trip — a parent posts a receipt in #treasurer and asks
+// to be paid back. The modal asks who to reimburse (defaulting to whoever
+// posted the receipt, since the person running the shortcut is often the
+// treasurer filing it on their behalf), the amount, and what it was for.
+//
+// Same posture as the receipt queue: the row lands `pending`, which counts
+// toward nothing. A signed-in leader approves it in the app.
+
+/** What the unit modal carries between `views.open` and `view_submission`. */
+type UnitViewMeta = ViewMeta;
+
+function unitExpenseView(meta: UnitViewMeta, payeeSlackId: string | null) {
+  const fileNames = meta.files.map((f) => f.name).join(", ");
+  return {
+    type: "modal",
+    callback_id: UNIT_VIEW_CALLBACK_ID,
+    title: plain("Unit expense"),
+    submit: plain("Send to treasurer"),
+    close: plain("Cancel"),
+    private_metadata: JSON.stringify(meta),
+    blocks: [
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: `📎 ${meta.files.length === 1 ? "*1 file*" : `*${meta.files.length} files*`}: ${fileNames}` }],
+      },
+      {
+        type: "input",
+        block_id: "payee",
+        label: plain("Reimburse"),
+        element: {
+          type: "users_select",
+          action_id: "payee",
+          ...(payeeSlackId ? { initial_user: payeeSlackId } : {}),
+        },
+      },
+      {
+        type: "input",
+        block_id: "amount",
+        label: plain("Amount"),
+        element: { type: "plain_text_input", action_id: "amount", placeholder: plain("0.00") },
+      },
+      {
+        type: "input",
+        block_id: "description",
+        label: plain("What was it for?"),
+        element: {
+          type: "plain_text_input",
+          action_id: "description",
+          max_length: 200,
+          placeholder: plain("e.g. First-aid kit restock — REI"),
+        },
+      },
+      {
+        type: "input",
+        block_id: "spent_on",
+        optional: true,
+        label: plain("Date on the receipt"),
+        element: { type: "datepicker", action_id: "spent_on" },
+      },
+      {
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: "The treasurer reviews this before it's owed — nothing is recorded as money yet.",
+        }],
+      },
+    ],
+  };
+}
+
+async function onUnitMessageAction(env: SlackBindings, payload: any): Promise<void> {
+  const token = env.SLACK_BOT_TOKEN!;
+  const triggerId = payload.trigger_id;
+  const channel = payload.channel?.id ?? null;
+  const ts = payload.message?.ts ?? payload.message_ts ?? null;
+
+  const files = usableFiles((payload.message?.files ?? []) as SlackFile[]);
+  if (files.length === 0) {
+    await slackApi(token, "views.open", {
+      trigger_id: triggerId,
+      view: noticeView(
+        "No receipt found",
+        "That message has no photo or PDF attached that I can file.\n\nPost the receipt image (or a PDF, up to 10 MB) and run *Add as unit expense* on _that_ message.",
+      ),
+    });
+    return;
+  }
+
+  const meta: UnitViewMeta = { files, channel, ts, permalink: archiveUrl(payload.team?.domain, channel, ts) };
+  // Default the payee to the message's author: the receipt is theirs. Bots and
+  // integrations post without a `user`, which just leaves the picker empty.
+  const author: string | null = payload.message?.user ?? null;
+  await slackApi(token, "views.open", { trigger_id: triggerId, view: unitExpenseView(meta, author) });
+}
+
+async function onUnitViewSubmission(
+  env: SlackBindings,
+  payload: any,
+  ctx: ExecutionContext,
+): Promise<Record<string, unknown> | null> {
+  const view = payload.view;
+  const meta = JSON.parse(view?.private_metadata || "{}") as UnitViewMeta;
+  const slackUserId: string = payload.user?.id ?? "";
+  const slackUserName: string =
+    payload.user?.name ?? payload.user?.username ?? payload.user?.id ?? "someone on Slack";
+  const teamId: string | null = payload.team?.id ?? null;
+
+  const payeeSlackId = view?.state?.values?.payee?.payee?.selected_user ?? null;
+  const amount = parseAmount(stateValue(view, "amount", "amount"));
+  const description = (stateValue(view, "description", "description") ?? "").trim();
+  const spentOn: string | null = view?.state?.values?.spent_on?.spent_on?.selected_date ?? null;
+
+  if (!payeeSlackId) return fieldError("payee", "Pick who should be paid back.");
+  if (amount == null) return fieldError("amount", "Enter the amount on the receipt, e.g. 48.21");
+  if (!description) return fieldError("description", "Say what this was for, e.g. First-aid kit restock");
+  if (!meta.files?.length) {
+    return fieldError("amount", "I lost track of the file on that message — start the shortcut again.");
+  }
+
+  const { count } = (await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM unit_expenses WHERE slack_user_id = ? AND status = 'pending'",
+  )
+    .bind(slackUserId)
+    .first<{ count: number }>()) ?? { count: 0 };
+  if (count >= MAX_PENDING_PER_USER) {
+    return fieldError(
+      "amount",
+      "You already have plenty of expenses waiting for review — give the treasurer a chance to catch up.",
+    );
+  }
+
+  // The payee is correlated to a member the same way the submitter is. A miss
+  // is recorded as a miss: payee_email stays NULL and the treasurer picks the
+  // member at approval, rather than this guessing who is owed money.
+  const payee = await resolveSlackMember(env.IDDB, teamId, payeeSlackId);
+  const payeeName =
+    payee?.name ?? (payeeSlackId === slackUserId ? slackUserName : `Slack member ${payeeSlackId}`);
+
+  const inserted = await env.DB.prepare(
+    `INSERT INTO unit_expenses
+       (payee_email, payee_name, payee_slack_id, description, amount, spent_on, status, source,
+        slack_user_id, slack_team_id, slack_user_name, slack_channel_id, slack_message_ts, slack_permalink)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', 'slack', ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+  )
+    .bind(
+      payee?.email ?? null, payeeName, payeeSlackId, description, amount, spentOn,
+      slackUserId, teamId, slackUserName, meta.channel, meta.ts, meta.permalink,
+    )
+    .first<{ id: number }>();
+  if (!inserted) return fieldError("amount", "Couldn't save that — try again in a moment.");
+
+  ctx.waitUntil(
+    storeUnitFiles(env, inserted.id, meta, { amount, description, payeeSlackId }).catch((e) => {
+      console.error("unit expense file transfer failed", e);
+    }),
+  );
+  return { response_action: "clear" };
+}
+
+/** As `storeSlackFiles`: no file that survives means no row. */
+async function storeUnitFiles(
+  env: SlackBindings,
+  unitExpenseId: number,
+  meta: UnitViewMeta,
+  summary: { amount: number; description: string; payeeSlackId: string },
+): Promise<void> {
+  const stored = await copySlackFiles(env, meta, `unit/${unitExpenseId}`, (key, filename, f, size) =>
+    env.DB.prepare(
+      `INSERT INTO unit_expense_files (unit_expense_id, r2_key, filename, content_type, size, slack_file_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(unitExpenseId, key, filename, f.mimetype, size, f.id || null)
+      .run(),
+  );
+
+  if (stored === 0) {
+    await env.DB.prepare("DELETE FROM unit_expenses WHERE id = ?").bind(unitExpenseId).run();
+    await postThreadReply(
+      env,
+      meta.channel,
+      meta.ts,
+      "⚠️ I couldn't copy that receipt out of Slack, so nothing was filed. Try the shortcut again, or add it in the expense app under Unit expenses.",
+    );
+    return;
+  }
+
+  await postThreadReply(
+    env,
+    meta.channel,
+    meta.ts,
+    `📎 Filed as a unit expense — *${summary.description}*, ${money(summary.amount)}, to reimburse <@${summary.payeeSlackId}>. The treasurer will review it.`,
+  );
+}
+
+/**
+ * Tell the thread where a unit expense went: approved, turned down, or paid.
+ * Fire-and-forget from the routes, like `notifyReviewed`.
+ */
+export async function notifyUnitExpense(
+  env: SlackBindings,
+  row: {
+    slack_channel_id: string | null;
+    slack_message_ts: string | null;
+    payee_slack_id: string | null;
+    payee_name: string;
+    description: string;
+    amount: number;
+  },
+  outcome: "approved" | "rejected" | "paid",
+  note: string | null,
+): Promise<void> {
+  const who = row.payee_slack_id ? `<@${row.payee_slack_id}>` : row.payee_name;
+  const what = `*${row.description}* (${money(row.amount)})`;
+  const text =
+    outcome === "approved"
+      ? `✅ ${what} is approved — the troop owes ${who}.`
+      : outcome === "paid"
+        ? `💸 ${what} has been paid to ${who}${note ? ` — ${note}` : "."}`
+        : `🚫 ${what} wasn't approved${note ? `: ${note}` : "."}`;
+  await postThreadReply(env, row.slack_channel_id, row.slack_message_ts, text);
 }

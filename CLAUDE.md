@@ -20,7 +20,8 @@ distances. Full details in [STACK.md](./STACK.md).
 ```
 src/shared    types + constants (BASE_PATH=/manage/expenses, HOME_ADDRESS)
 src/worker    Hono API, session auth, roster reader, geo proxy, seed, paysheet engine,
-              notice mail (mail.ts / events.ts / inbound.ts), Slack shortcut (slack.ts)
+              notice mail (mail.ts / events.ts / inbound.ts), Slack shortcuts (slack.ts),
+              unit (non-trip) expenses (unit.ts)
 src/client    React SPA (App.tsx), API client
 migrations    D1 schema
 ```
@@ -71,6 +72,9 @@ npm run deploy              # build + wrangler deploy (production)
   `users.slack_sub` in `IDDB`, and an unmatched sender is surfaced, not assumed.
   Needs `SLACK_SIGNING_SECRET` + `SLACK_BOT_TOKEN`; absent either, the route 503s
   and nothing else changes. Runbook: [README](./README.md#tagging-receipts-from-slack).
+  The second shortcut, "Add as unit expense", follows the same rule: it lands a
+  `pending` row in `unit_expenses` that counts toward nothing until a leader
+  approves it. See [README](./README.md#unit-expenses).
 - Don't raise `_dmarc` past `p=none` without first checking the aggregate reports
   for other senders using the domain. Runbook: [README](./README.md#email-setup).
 - Run `npm run typecheck` before committing.

@@ -319,7 +319,12 @@ export interface StatementEvent {
 export interface PersonStatement {
   person: { email: string | null; name: string; matched: boolean };
   events: StatementEvent[];
-  totalOutstanding: number; // sum of live outstanding across events (positive => owed to them)
+  /** Non-trip reimbursements filed for this member (newest first). Pending and
+   *  rejected ones are shown for context but never counted. */
+  unitExpenses: StatementUnitExpense[];
+  /** Approved-but-unpaid unit expenses: what the troop owes them outside trips. */
+  unitOutstanding: number;
+  totalOutstanding: number; // trips' live outstanding + unitOutstanding (positive => owed to them)
   projected: boolean; // true when any event is still projected (not fully snapshotted)
 }
 
@@ -568,4 +573,81 @@ export interface SlackReceipt {
   review_note: string | null;
   created_at: string;
   files: SlackReceiptFile[];
+}
+
+// ----- unit expenses -----
+// Non-trip reimbursements: one member fronted something for the troop and gets
+// it back. No shares, no cost groups. `pending` (how a Slack submission lands)
+// is inert and counts toward nothing until a leader approves it.
+
+export type UnitExpenseStatus = "pending" | "approved" | "rejected" | "paid";
+
+export interface UnitExpenseFile {
+  id: number;
+  unit_expense_id: number;
+  filename: string;
+  content_type: string;
+  size: number;
+}
+
+/** The latest email sent about a unit expense, for the delivery chip. */
+export interface UnitExpenseSendSummary {
+  kind: "approved" | "paid";
+  status: NoticeSendStatus;
+  to_email: string;
+  sent_at: string;
+  error_detail: string | null;
+  count: number;
+}
+
+export interface UnitExpense {
+  id: number;
+  /** Null only while pending and unmatched — the leader picks a payee to approve. */
+  payee_email: string | null;
+  payee_name: string;
+  description: string;
+  amount: number;
+  spent_on: string | null;
+  status: UnitExpenseStatus;
+  source: "app" | "slack";
+  created_by: string | null;
+  created_at: string;
+  slack_user_name: string | null;
+  slack_permalink: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  paid_by: string | null;
+  paid_at: string | null;
+  paid_note: string | null;
+  files: UnitExpenseFile[];
+  lastSend: UnitExpenseSendSummary | null;
+}
+
+/** One unit expense as its payee sees it on My statement. */
+export interface StatementUnitExpense {
+  id: number;
+  description: string;
+  amount: number;
+  spent_on: string | null;
+  status: UnitExpenseStatus;
+  created_at: string;
+  paid_at: string | null;
+  paid_note: string | null;
+  review_note: string | null;
+}
+
+/** An adult the app can reimburse directly (roster adults with an email). */
+export interface UnitPayee {
+  name: string;
+  email: string;
+}
+
+/** The email about a unit expense, rendered for preview before sending. */
+export interface UnitExpenseNotice {
+  kind: "approved" | "paid";
+  to: string | null;
+  subject: string;
+  html: string;
+  body: string;
 }

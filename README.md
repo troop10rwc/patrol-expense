@@ -225,6 +225,39 @@ tunnel's URL as the Interactivity Request URL. Without one, put any value in
 `SLACK_SIGNING_SECRET` and POST a signed payload yourself — the signature is
 `v0=` + HMAC-SHA256 of `v0:<timestamp>:<raw body>`.
 
+
+## Unit expenses
+
+Not every reimbursement belongs to a trip — a first-aid restock, a campsite
+deposit, printer toner. **Unit expenses** (`/manage/expenses/unit`, linked from
+the trip list) are one member, one receipt, one payback: no shares, no cost
+groups, no snapshots. Lifecycle is `pending → approved → paid` (or `rejected`);
+logic in `src/worker/unit.ts`, schema in `migrations/0010_unit_expenses.sql`.
+
+- **Two ways in.** A leader adds one on the page (it lands *approved* — a
+  signed-in leader typing it is the approval), or anyone runs **Add as unit
+  expense** on a receipt message in Slack, typically in `#treasurer`. The Slack
+  path lands *pending* and is inert, exactly like the trip receipt queue: it
+  counts toward nothing until a leader approves it on the page.
+- **Statement roll-up.** Approved-but-unpaid unit expenses are added to the
+  payee's **My statement** total (matched by email), appear in the "other
+  balances" on a shared trip statement, and are returned by the
+  `getOutstandingForMember` RPC. Paid and turned-down ones stay listed as history.
+- **Notifications.** The Slack thread gets a reply when it's filed, approved,
+  turned down, and paid. The **✉ Email** button previews then sends the payee an
+  "approved — the troop owes you" or "paid" email through the same Email Sending
+  binding as trip notices; delivery status folds back from the same event queue
+  into `unit_expense_sends`. Replies go to `MAIL_FALLBACK` (the treasurer), since
+  the corrections queue is trip-scoped.
+
+**Slack app setup:** add a second message shortcut alongside the first —
+Name `Add as unit expense`, Callback ID **`add_unit_expense`** (must match
+`UNIT_SHORTCUT_CALLBACK_ID`) — and `/invite` the bot to `#treasurer`. No new
+scopes or secrets: the payee picker is a `users_select`, and the payee defaults
+to whoever posted the receipt (so a treasurer can file it on their behalf). A
+payee Slack can't match to a member (`users.slack_sub`) is left unmatched and the
+leader picks them before approving.
+
 ## Email setup (one-time, Cloudflare + Google Workspace)
 
 `troop10rwc.org` runs on **Google Workspace**, so the order here matters. Read

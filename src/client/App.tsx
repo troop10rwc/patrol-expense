@@ -22,6 +22,11 @@ import type {
   PublicStatement,
   PaysheetRow,
   Paysheet,
+  UnitExpense,
+  UnitExpenseNotice,
+  UnitExpenseSendSummary,
+  UnitPayee,
+  StatementUnitExpense,
 } from "../shared/types.ts";
 import { diffBundles, type BundleDiff, type FieldChange } from "../shared/diff.ts";
 import { api, publicApi, money, HOME_ADDRESS, loginUrl, logoutUrl, UnauthorizedError, ApiError, type Me } from "./api.ts";
@@ -81,7 +86,11 @@ function BackOffice() {
 
   const path = appPath();
   const m = path.slice(1).match(UUID_RE);
-  const view = path === "/me" ? <StatementPage /> : m ? <TripView uuid={m[1]} /> : <IndexPage />;
+  const view =
+    path === "/me" ? <StatementPage />
+    : path === "/unit" ? <UnitExpensesPage />
+    : m ? <TripView uuid={m[1]} />
+    : <IndexPage />;
   return (
     <div className="t10-app">
       <BackOfficeTopNav active="expenses" user={{ name: me.name }} logoutUrl={logoutUrl(me.authOrigin)} />
@@ -142,6 +151,7 @@ function IndexPage() {
         </div>
         <div className="row">
           <a className="btn ghost" href={appHref("/me")}>My statement</a>
+          <a className="btn ghost" href={appHref("/unit")}>Unit expenses</a>
           <button className="btn ghost" onClick={() => setShowImport(true)}>Import from Google Sheet</button>
           <button className="btn" onClick={() => setShowNew(true)}>+ New trip</button>
         </div>
@@ -249,6 +259,7 @@ function StatementPage() {
       ) : (
         <>
           <StatementTotal stmt={stmt} />
+          {stmt.unitExpenses.length > 0 && <StatementUnitCard stmt={stmt} />}
           {stmt.events.map((ev) => <StatementEventCard key={ev.trip.uuid} ev={ev} />)}
         </>
       )}
@@ -277,6 +288,46 @@ function StatementTotal({ stmt }: { stmt: PersonStatement }) {
       {stmt.projected && (
         <p className="hint">Some trips haven't been finalized in a snapshot yet, so this total may still change as expenses are collected.</p>
       )}
+    </div>
+  );
+}
+
+const UNIT_STATUS_LABEL: Record<StatementUnitExpense["status"], string> = {
+  pending: "awaiting review",
+  approved: "owed to you",
+  paid: "paid",
+  rejected: "turned down",
+};
+
+/** Non-trip reimbursements. Only approved ones count toward the total above. */
+function StatementUnitCard({ stmt }: { stmt: PersonStatement }) {
+  const o = stmt.unitOutstanding;
+  return (
+    <div className="card stmt-event">
+      <div className="row stmt-event-head">
+        <strong style={{ fontSize: 16 }}>Unit expenses</strong>
+        <span className="hint">Reimbursements outside of trips</span>
+      </div>
+      <div className="stmt-event-amt">
+        <span className="hint">{o > 0.005 ? "Owed to you" : "Settled"}</span>{" "}
+        <strong>{money(o)}</strong>
+      </div>
+      <div className="stmt-hist">
+        {stmt.unitExpenses.map((u) => (
+          <div className="stmt-hist-row" key={u.id}>
+            <span className="stmt-hist-when">
+              {u.description}
+              <span className="hint">
+                {" · "}{u.spent_on ?? fmtTime(u.created_at)}
+                {u.status === "paid" && u.paid_note ? ` · ${u.paid_note}` : ""}
+                {u.status === "rejected" && u.review_note ? ` · ${u.review_note}` : ""}
+              </span>
+            </span>
+            <span className={`pill ${u.status === "paid" ? "pill-good" : ""}`}>{UNIT_STATUS_LABEL[u.status]}</span>
+            <span className="stmt-hist-out">{money(u.amount)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -331,6 +382,478 @@ function StatementEventCard({ ev }: { ev: StatementEvent }) {
             <span className={`stmt-hist-delta ${ev.liveDelta < 0 ? "neg" : ""}`}>{signed(ev.liveDelta)}</span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------ Unit expenses
+// Non-trip reimbursements: one member fronted something for the troop and gets
+// it back. No shares, no snapshots — the receipt's amount is what's owed.
+//
+// Two ways in: added here by a leader (lands approved, since a leader typing it
+// IS the approval), or tagged in Slack with "Add as unit expense" (lands in the
+// review queue at the top, inert until approved). Approved ones roll up into
+// the payee's My statement total until they're marked paid.
+function UnitExpensesPage() {
+  const [items, setItems] = useState<UnitExpense[] | null>(null);
+  const [payees, setPayees] = useState<UnitPayee[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showSettled, setShowSettled] = useState(false);
+  const [noticeFor, setNoticeFor] = useState<UnitExpense | null>(null);
+
+  useEffect(() => {
+    api.listUnitExpenses().then(setItems).catch((e) => { setErr(String(e)); setItems([]); });
+    api.listUnitPayees().then(setPayees).catch(() => {});
+  }, []);
+
+  // Every write returns the fresh list.
+  async function run(fn: () => Promise<UnitExpense[]>) {
+    setBusy(true); setErr(null);
+    try {
+      setItems(await fn());
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!items) return <div className="wrap">Loading…</div>;
+
+  const pending = items.filter((i) => i.status === "pending");
+  const owed = items.filter((i) => i.status === "approved");
+  const settled = items.filter((i) => i.status === "paid" || i.status === "rejected");
+  const owedTotal = owed.reduce((s, i) => s + i.amount, 0);
+
+  return (
+    <div className="wrap">
+      <header className="app">
+        <div>
+          <h1>Unit expenses</h1>
+          <div className="meta"><span>Reimbursements that aren't tied to a trip</span></div>
+        </div>
+        <div className="row"><a className="btn ghost" href={appHref("/")}>← All trips</a></div>
+      </header>
+
+      {err && <div className="err">{err}</div>}
+
+      {noticeFor && (
+        <UnitNoticeModal
+          item={noticeFor}
+          onClose={() => setNoticeFor(null)}
+          onSent={() => { api.listUnitExpenses().then(setItems).catch(() => {}); }}
+        />
+      )}
+
+      {pending.length > 0 && (
+        <div className="card">
+          <div className="toolbar">
+            <h2 style={{ margin: 0 }}>
+              From Slack <span className="pill" style={{ marginLeft: 8 }}>{pending.length} to review</span>
+            </h2>
+          </div>
+          {pending.map((i) => (
+            <PendingUnitExpense
+              key={i.id}
+              item={i}
+              payees={payees}
+              busy={busy}
+              onApprove={(body) => run(() => api.approveUnitExpense(i.id, body))}
+              onReject={(note) => run(() => api.rejectUnitExpense(i.id, note || undefined))}
+            />
+          ))}
+          <p><small className="hint">
+            Tagged with <strong>Add as unit expense</strong> from a message's ⋮ menu in Slack.
+            Approving is what makes it owed — nothing from Slack counts before that.
+          </small></p>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="toolbar">
+          <h2 style={{ margin: 0 }}>Owed to members</h2>
+          <div className="spacer" />
+          {owed.length > 0 && <strong className="num">{money(owedTotal)}</strong>}
+        </div>
+        <UnitExpenseTable items={owed} busy={busy} run={run} onEmail={setNoticeFor} empty="Nothing owed right now." />
+        <AddUnitExpense payees={payees} busy={busy} onAdd={(body, files) => run(() => api.addUnitExpense(body, files))} />
+      </div>
+
+      {settled.length > 0 && (
+        <div className="card">
+          <div className="toolbar">
+            <h2 style={{ margin: 0 }}>Settled</h2>
+            <div className="spacer" />
+            <label className="row" style={{ alignItems: "center", gap: 6 }}>
+              <input type="checkbox" checked={showSettled} onChange={(e) => setShowSettled(e.target.checked)} />
+              <span className="hint">Show paid and turned down ({settled.length})</span>
+            </label>
+          </div>
+          {showSettled && <UnitExpenseTable items={settled} busy={busy} run={run} onEmail={setNoticeFor} empty="" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Delivery state of the latest email about a unit expense. */
+function unitDeliveryChip(s: UnitExpenseSendSummary): { label: string; tone: string; title: string } {
+  const what = s.kind === "paid" ? "Paid notice" : "Approval notice";
+  const again = s.count > 1 ? ` (${s.count} emails sent)` : "";
+  const base = `${what} to ${s.to_email}, ${fmtTime(s.sent_at)}${again}`;
+  switch (s.status) {
+    case "complained": return { label: "spam report", tone: "pill-bad", title: `${base}. Marked as spam — reach them another way.` };
+    case "bounced": return { label: "bounced", tone: "pill-bad", title: s.error_detail ?? `${base}. Bounced — check the address.` };
+    case "rejected": return { label: "rejected", tone: "pill-bad", title: s.error_detail ?? `${base}. Refused by the mail service.` };
+    case "failed": return { label: "failed", tone: "pill-bad", title: s.error_detail ?? `${base}. Couldn't be sent.` };
+    case "delivered": return { label: "delivered", tone: "pill-good", title: `${base}. Delivered.` };
+    case "deferred": return { label: "delayed", tone: "pill-warn", title: `${base}. Their server is deferring it; still retrying.` };
+    default: return { label: "sent", tone: "", title: `${base}. Waiting on delivery confirmation.` };
+  }
+}
+
+function UnitExpenseTable({
+  items, busy, run, onEmail, empty,
+}: {
+  items: UnitExpense[];
+  busy: boolean;
+  run: (fn: () => Promise<UnitExpense[]>) => Promise<void>;
+  onEmail: (item: UnitExpense) => void;
+  empty: string;
+}) {
+  if (items.length === 0) return empty ? <p className="empty">{empty}</p> : null;
+
+  function markPaid(i: UnitExpense) {
+    // A short free-text note is all this needs ("check #1042", "Venmo"), and it's
+    // optional — a prompt keeps the row from growing a form for it.
+    const note = prompt(`Mark ${money(i.amount)} to ${i.payee_name} as paid?\n\nHow was it paid? (optional — e.g. check #1042, Venmo)`);
+    if (note === null) return;
+    void run(() => api.setUnitExpensePaid(i.id, true, note.trim() || undefined));
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Payee</th><th>What</th><th>Date</th><th className="num">Amount</th>
+          <th>Receipt</th><th>Status</th><th>Email</th><th />
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((i) => {
+          const chip = i.lastSend ? unitDeliveryChip(i.lastSend) : null;
+          return (
+            <tr key={i.id} className={i.status === "rejected" ? "zero" : ""}>
+              <td>{i.payee_name}<div className="hint">{i.payee_email ?? "no email"}</div></td>
+              <td>
+                {i.slack_permalink
+                  ? <a href={i.slack_permalink} target="_blank" rel="noreferrer">{i.description} ↗</a>
+                  : i.description}
+                {i.review_note && <div className="hint">{i.review_note}</div>}
+              </td>
+              <td className="hint">{i.spent_on ?? fmtTime(i.created_at)}</td>
+              <td className="num">{money(i.amount)}</td>
+              <td>
+                {i.files.length === 0
+                  ? <span className="hint">—</span>
+                  : i.files.map((f) => (
+                    <a key={f.id} href={api.unitExpenseFileUrl(f.id)} target="_blank" rel="noreferrer" title={f.filename}>
+                      📎{" "}
+                    </a>
+                  ))}
+              </td>
+              <td>
+                {i.status === "approved" && (
+                  <button className="btn ghost sm-btn" disabled={busy} onClick={() => markPaid(i)}>Mark paid</button>
+                )}
+                {i.status === "paid" && (
+                  <>
+                    <span className="pill pill-good" title={i.paid_by ? `by ${i.paid_by}` : undefined}>
+                      paid {i.paid_at ? fmtTime(i.paid_at) : ""}
+                    </span>
+                    {i.paid_note && <div className="hint">{i.paid_note}</div>}
+                  </>
+                )}
+                {i.status === "rejected" && <span className="pill">turned down</span>}
+              </td>
+              <td className="notice-cell">
+                {(i.status === "approved" || i.status === "paid") && (
+                  <>
+                    <button className="btn ghost sm-btn" disabled={!i.payee_email} onClick={() => onEmail(i)}>✉ Email</button>
+                    {chip && <span className={`pill ${chip.tone}`} title={chip.title}>{chip.label}</span>}
+                  </>
+                )}
+              </td>
+              <td>
+                {i.status === "paid" ? (
+                  <button
+                    className="btn ghost sm-btn"
+                    disabled={busy}
+                    title="Undo the paid mark (it goes back to owed)"
+                    onClick={() => confirm(`Mark ${i.description} as not paid? It goes back to owed.`) && run(() => api.setUnitExpensePaid(i.id, false))}
+                  >
+                    Undo
+                  </button>
+                ) : (
+                  <button
+                    className="btn ghost danger sm-btn"
+                    disabled={busy}
+                    title="Delete this expense and its receipt"
+                    onClick={() => confirm(`Delete ${i.description} (${money(i.amount)}) for ${i.payee_name}? Its receipt is deleted too.`) && run(() => api.deleteUnitExpense(i.id))}
+                  >
+                    ×
+                  </button>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+/** Payee <select> over roster adults; keeps a current payee who isn't listed. */
+function PayeeSelect({
+  payees, value, onChange, disabled,
+}: {
+  payees: UnitPayee[];
+  value: UnitPayee | null;
+  onChange: (p: UnitPayee | null) => void;
+  disabled: boolean;
+}) {
+  const options = value && !payees.some((p) => p.email.toLowerCase() === value.email.toLowerCase())
+    ? [value, ...payees]
+    : payees;
+  return (
+    <select
+      value={value?.email.toLowerCase() ?? ""}
+      disabled={disabled}
+      onChange={(e) => onChange(options.find((p) => p.email.toLowerCase() === e.target.value) ?? null)}
+    >
+      <option value="">Who gets paid back?</option>
+      {options.map((p) => <option key={p.email} value={p.email.toLowerCase()}>{p.name}</option>)}
+    </select>
+  );
+}
+
+function AddUnitExpense({
+  payees, busy, onAdd,
+}: {
+  payees: UnitPayee[];
+  busy: boolean;
+  onAdd: (body: Parameters<typeof api.addUnitExpense>[0], files: File[]) => Promise<void>;
+}) {
+  const [payee, setPayee] = useState<UnitPayee | null>(null);
+  const [desc, setDesc] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const amt = parseFloat(amount);
+  const ready = !!payee && !!desc.trim() && Number.isFinite(amt) && amt > 0;
+
+  async function add() {
+    if (!payee) return;
+    await onAdd(
+      { payee_email: payee.email, payee_name: payee.name, description: desc.trim(), amount: amt, spent_on: date || null },
+      files,
+    );
+    setDesc(""); setAmount(""); setDate(""); setFiles([]);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <h3 style={{ margin: "0 0 8px" }}>Add a unit expense</h3>
+      <div className="row" style={{ alignItems: "flex-end" }}>
+        <label className="fld">Reimburse
+          <PayeeSelect payees={payees} value={payee} onChange={setPayee} disabled={busy} />
+        </label>
+        <label className="fld" style={{ flex: 1, minWidth: 180 }}>What for
+          <input value={desc} disabled={busy} placeholder="e.g. First-aid kit restock — REI" onChange={(e) => setDesc(e.target.value)} />
+        </label>
+        <label className="fld">Amount
+          <input className="sm" value={amount} disabled={busy} inputMode="decimal" placeholder="0.00" onChange={(e) => setAmount(e.target.value)} />
+        </label>
+        <label className="fld">Date
+          <input type="date" value={date} disabled={busy} onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <label className="fld">Receipt
+          <input ref={fileRef} type="file" accept="image/*,application/pdf" multiple disabled={busy}
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []))} />
+        </label>
+        <button className="btn" disabled={busy || !ready} onClick={add}>Add</button>
+      </div>
+      <p><small className="hint">Added here, it's owed straight away and shows on {payee?.name ?? "their"} statement.</small></p>
+    </div>
+  );
+}
+
+/** A Slack submission, every field editable, with its photo beside it. */
+function PendingUnitExpense({
+  item, payees, busy, onApprove, onReject,
+}: {
+  item: UnitExpense;
+  payees: UnitPayee[];
+  busy: boolean;
+  onApprove: (body: Parameters<typeof api.approveUnitExpense>[1]) => Promise<void>;
+  onReject: (note: string) => Promise<void>;
+}) {
+  // Null when Slack couldn't match the picked person to a troop member — the
+  // leader has to say who's owed, and Approve stays disabled until they do.
+  const [payee, setPayee] = useState<UnitPayee | null>(
+    item.payee_email ? { name: item.payee_name, email: item.payee_email } : null,
+  );
+  const [desc, setDesc] = useState(item.description);
+  const [amount, setAmount] = useState(item.amount.toFixed(2));
+  const [date, setDate] = useState(item.spent_on ?? "");
+  const [rejecting, setRejecting] = useState(false);
+  const [note, setNote] = useState("");
+  const amt = parseFloat(amount);
+  const ready = !!payee && !!desc.trim() && Number.isFinite(amt) && amt > 0;
+
+  return (
+    <div className="slack-receipt">
+      <div className="slack-receipt-photos">
+        {item.files.map((f) => (
+          <a key={f.id} href={api.unitExpenseFileUrl(f.id)} target="_blank" rel="noreferrer"
+            title={`${f.filename} (${Math.round(f.size / 1024)} KB)`}>
+            {f.content_type.startsWith("image/")
+              ? <img src={api.unitExpenseFileUrl(f.id)} alt={f.filename} />
+              : <span className="pill">📄 {f.filename}</span>}
+          </a>
+        ))}
+      </div>
+      <div className="slack-receipt-body">
+        <div className="hint" style={{ marginBottom: 8 }}>
+          Filed by <strong>{item.slack_user_name ?? "someone on Slack"}</strong> for <strong>{item.payee_name}</strong>
+          {" · "}{fmtTime(item.created_at)}
+          {item.slack_permalink && <> · <a href={item.slack_permalink} target="_blank" rel="noreferrer">the message ↗</a></>}
+        </div>
+        {!item.payee_email && (
+          <p className="warn-note">
+            The person picked in Slack isn't linked to a troop member, so there's no statement to put
+            this on yet. Pick who's owed before approving.
+          </p>
+        )}
+        <div className="row">
+          <label className="fld">Reimburse
+            <PayeeSelect payees={payees} value={payee} onChange={setPayee} disabled={busy} />
+          </label>
+          <label className="fld" style={{ flex: 1, minWidth: 160 }}>What for
+            <input value={desc} disabled={busy} onChange={(e) => setDesc(e.target.value)} />
+          </label>
+          <label className="fld">Amount
+            <input className="sm" value={amount} disabled={busy} inputMode="decimal" onChange={(e) => setAmount(e.target.value)} />
+          </label>
+          <label className="fld">Date
+            <input type="date" value={date} disabled={busy} onChange={(e) => setDate(e.target.value)} />
+          </label>
+          <button
+            className="btn"
+            disabled={busy || !ready}
+            onClick={() => payee && onApprove({
+              payee_email: payee.email, payee_name: payee.name, description: desc.trim(), amount: amt, spent_on: date || null,
+            })}
+          >
+            Approve
+          </button>
+          <button className="btn ghost" disabled={busy} onClick={() => setRejecting((v) => !v)}>
+            {rejecting ? "Cancel" : "Turn down"}
+          </button>
+        </div>
+        {rejecting && (
+          <div className="row" style={{ marginTop: 8 }}>
+            <label className="fld" style={{ flex: 1, minWidth: 220 }}>Why <span className="hint">(sent back to the Slack thread)</span>
+              <input value={note} disabled={busy} placeholder="e.g. that's a trip expense — tag it on the trip instead"
+                onChange={(e) => setNote(e.target.value)} />
+            </label>
+            <button className="btn danger" disabled={busy} onClick={() => onReject(note)}>Turn down</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Preview, then send, the email about one unit expense — "approved, the troop
+ * owes you" or "it's been paid", depending on where it stands. The server
+ * renders it from the row and rebuilds it again on send; nothing here is trusted.
+ */
+function UnitNoticeModal({ item, onClose, onSent }: { item: UnitExpense; onClose: () => void; onSent: () => void }) {
+  const [notice, setNotice] = useState<UnitExpenseNotice | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [view, setView] = useState<"rich" | "plain">("rich");
+  const [sending, setSending] = useState(false);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.previewUnitNotice(item.id)
+      .then((n) => { if (!cancelled) setNotice(n); })
+      .catch((e) => { if (!cancelled) setErr(e instanceof Error ? e.message : String(e)); });
+    return () => { cancelled = true; };
+  }, [item.id]);
+
+  async function send(resend = false) {
+    setSending(true); setErr(null);
+    try {
+      const res = await api.sendUnitNotice(item.id, resend);
+      setSentTo(res.to);
+      onSent();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && !resend) {
+        setSending(false);
+        if (confirm(`${item.payee_name} has already been sent this. Send it again?`)) return send(true);
+        return;
+      }
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal notice-modal" onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ marginTop: 0 }}>Email {item.payee_name}</h2>
+        {err && <div className="err">{err}</div>}
+        {!notice ? (
+          !err && <p className="hint">Preparing…</p>
+        ) : (
+          <>
+            <label className="fld" style={{ display: "block", marginBottom: 4 }}>To
+              <input readOnly value={notice.to ?? "—"} />
+            </label>
+            <label className="fld" style={{ display: "block", marginBottom: 4 }}>Subject
+              <input readOnly value={notice.subject} />
+            </label>
+            <div className="preview-tabs">
+              <button className={`preview-tab ${view === "rich" ? "on" : ""}`} onClick={() => setView("rich")}>Formatted</button>
+              <button className={`preview-tab ${view === "plain" ? "on" : ""}`} onClick={() => setView("plain")}>Plain text</button>
+            </div>
+            {view === "rich"
+              ? <iframe className="notice-preview" title="Email preview" sandbox="" srcDoc={notice.html} />
+              : <pre className="notice-body">{notice.body}</pre>}
+            {sentTo && (
+              <div className="ok-note" style={{ marginTop: 12 }}>
+                Sent to <strong>{sentTo}</strong>. Delivery shows beside the Email button as the mail service reports back.
+              </div>
+            )}
+          </>
+        )}
+        <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+          <button className="btn" disabled={!notice?.to || sending} onClick={() => send()}>
+            {sending ? "Sending…" : sentTo ? "Send again" : "Send email"}
+          </button>
+          <div className="spacer" />
+          <button className="btn ghost" onClick={onClose}>Close</button>
+        </div>
+        <p><small className="hint">Sent from the troop's expenses address; replies go to the treasurer.</small></p>
       </div>
     </div>
   );

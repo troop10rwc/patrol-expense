@@ -67,6 +67,14 @@ export async function applyEmailEvent(db: D1Database, body: EmailEventBody): Pro
     .prepare("SELECT id, status FROM notice_sends WHERE message_id = ?")
     .bind(messageId)
     .first<{ id: number; status: NoticeSendStatus }>();
+  // Not a trip notice? It may be a unit-expense email, which records its sends
+  // in its own table (unit_expense_sends) but shares this one event stream.
+  const unitSend = send
+    ? null
+    : await db
+        .prepare("SELECT id, status FROM unit_expense_sends WHERE message_id = ?")
+        .bind(messageId)
+        .first<{ id: number; status: NoticeSendStatus }>();
 
   // Logged even when no send row matches: an event can beat its own send row to
   // the database, and a lost bounce is exactly what this feature must not do.
@@ -80,15 +88,18 @@ export async function applyEmailEvent(db: D1Database, body: EmailEventBody): Pro
     .bind(send?.id ?? null, messageId, type, occurredAt, terminal, JSON.stringify(body.payload ?? {}).slice(0, 2000))
     .run();
 
-  if (!send) return true;
+  const target = send ?? unitSend;
+  if (!target) return true;
 
   // Only ever move forward. An out-of-order `deferred` must not un-deliver a
   // message, and a duplicate must not rewrite a status that already advanced.
-  if (rankStatus(status) <= rankStatus(send.status)) return true;
+  if (rankStatus(status) <= rankStatus(target.status)) return true;
 
+  // Table name from a fixed pair, never from input.
+  const table = send ? "notice_sends" : "unit_expense_sends";
   await db
     .prepare(
-      `UPDATE notice_sends
+      `UPDATE ${table}
           SET status = ?,
               status_at = ?,
               delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END,
@@ -96,7 +107,7 @@ export async function applyEmailEvent(db: D1Database, body: EmailEventBody): Pro
               error_detail = COALESCE(?, error_detail)
         WHERE id = ?`,
     )
-    .bind(status, occurredAt, status, occurredAt, code, detail?.slice(0, 500) ?? null, send.id)
+    .bind(status, occurredAt, status, occurredAt, code, detail?.slice(0, 500) ?? null, target.id)
     .run();
   return true;
 }

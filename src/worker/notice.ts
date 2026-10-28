@@ -21,7 +21,7 @@ import { buildStatement } from "./statement.ts";
 const EPS = 0.005;
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-function money(n: number): string {
+export function money(n: number): string {
   const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${n < 0 ? "-" : ""}$${abs}`;
 }
@@ -41,7 +41,7 @@ export function fmtWhen(sqliteUtc: string): string {
 }
 
 /** Greedy wrap so plain-text email bodies don't arrive as one endless line. */
-function wrap(text: string, width = 76): string {
+export function wrap(text: string, width = 76): string {
   return text
     .split("\n")
     .map((para) => {
@@ -199,21 +199,21 @@ function summaryRows(n: PersonNotice): { label: string; value: string }[] {
   return rows;
 }
 
-const escapeHtml = (s: string) =>
+export const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 // Troop palette, inlined. Email clients strip <style> blocks and know nothing
 // about CSS variables, so every colour is a literal on the element that uses it.
-const IN = "#1b2118";      // ink
-const SOFT = "#545b49";    // ink-soft
-const FAINT = "#878d77";   // ink-faint
-const SURFACE = "#faf8f1";
-const SURFACE2 = "#f2ede0";
-const LINE = "#d7cfba";
-const CLAY = "#bf4329";
-const CLAY_DEEP = "#9c3520";
-const PINE_DEEP = "#1d3d27";
-const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
+export const IN = "#1b2118";      // ink
+export const SOFT = "#545b49";    // ink-soft
+export const FAINT = "#878d77";   // ink-faint
+export const SURFACE = "#faf8f1";
+export const SURFACE2 = "#f2ede0";
+export const LINE = "#d7cfba";
+export const CLAY = "#bf4329";
+export const CLAY_DEEP = "#9c3520";
+export const PINE_DEEP = "#1d3d27";
+export const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
 
 /**
  * Render the HTML email — what the recipient actually sees.
@@ -415,6 +415,10 @@ export async function buildPublicStatement(
         if (ev.trip.uuid === notice.trip.uuid) continue;
         if (Math.abs(ev.outstanding) < EPS) continue;
         otherEvents.push({ name: ev.trip.name, trip_date: ev.trip.trip_date, outstanding: ev.outstanding });
+      }
+      // Approved-but-unpaid unit expenses are money the troop owes them too.
+      if (stmt.unitOutstanding > EPS) {
+        otherEvents.push({ name: "Unit expenses", trip_date: null, outstanding: stmt.unitOutstanding });
       }
     } catch {
       // Cross-event context is a bonus; never fail the page over it.

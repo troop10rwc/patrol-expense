@@ -2,6 +2,7 @@ import type {
   Trip, TripBundle, TripSummary, SettlementStatus, RosterMember, SnapshotMeta, Snapshot,
   ImportPreview, PersonStatement, PersonNotice, NoticeLink, Correction, CorrectionKind,
   CorrectionStatus, PublicStatement, NoticeSendStatus, SlackReceipt,
+  UnitExpense, UnitPayee, UnitExpenseNotice,
 } from "../shared/types.ts";
 import type { BundleDiff } from "../shared/diff.ts";
 import { BASE_PATH } from "../shared/constants.ts";
@@ -212,6 +213,43 @@ export const api = {
   ) => req<TripBundle>(`/api/slack-receipts/${rid}/approve`, { method: "POST", body: JSON.stringify(body) }),
   rejectSlackReceipt: (rid: number, note?: string) =>
     req<{ ok: true }>(`/api/slack-receipts/${rid}/reject`, { method: "POST", body: JSON.stringify({ note }) }),
+
+  // ---- unit expenses (non-trip reimbursements) ----
+  // Every write returns the whole (small) list, so the page just re-renders it.
+  listUnitExpenses: () => req<UnitExpense[]>("/api/unit-expenses"),
+  listUnitPayees: () => req<UnitPayee[]>("/api/unit-expenses/payees"),
+  addUnitExpense: (
+    body: { payee_email: string; payee_name: string; description: string; amount: number; spent_on?: string | null },
+    files?: File[],
+  ) => {
+    if (files && files.length) {
+      const form = new FormData();
+      for (const [k, v] of Object.entries(body)) if (v != null) form.set(k, String(v));
+      for (const f of files) form.append("files", f);
+      return reqForm<UnitExpense[]>("/api/unit-expenses", form);
+    }
+    return req<UnitExpense[]>("/api/unit-expenses", { method: "POST", body: JSON.stringify(body) });
+  },
+  // Approving a Slack submission is what makes it money; the leader can correct
+  // any field (and must pick a payee if Slack couldn't match one).
+  approveUnitExpense: (
+    id: number,
+    body: { payee_email?: string; payee_name?: string; description?: string; amount?: number; spent_on?: string | null },
+  ) => req<UnitExpense[]>(`/api/unit-expenses/${id}/approve`, { method: "POST", body: JSON.stringify(body) }),
+  rejectUnitExpense: (id: number, note?: string) =>
+    req<UnitExpense[]>(`/api/unit-expenses/${id}/reject`, { method: "POST", body: JSON.stringify({ note }) }),
+  setUnitExpensePaid: (id: number, paid: boolean, note?: string) =>
+    req<UnitExpense[]>(`/api/unit-expenses/${id}/paid`, { method: "POST", body: JSON.stringify({ paid, note }) }),
+  deleteUnitExpense: (id: number) => req<UnitExpense[]>(`/api/unit-expenses/${id}`, { method: "DELETE" }),
+  unitExpenseFileUrl: (fid: number) => `${BASE_PATH}/api/unit-expense-files/${fid}`,
+  // The email is rendered server-side from the row: preview it, then send it.
+  // A repeat of the same news needs `resend`, else ApiError 409.
+  previewUnitNotice: (id: number) => req<UnitExpenseNotice>(`/api/unit-expenses/${id}/notice`),
+  sendUnitNotice: (id: number, resend = false) =>
+    req<{ ok: true; send_id: number; to: string; status: NoticeSendStatus }>(
+      `/api/unit-expenses/${id}/notice/send${resend ? "?resend=1" : ""}`,
+      { method: "POST" },
+    ),
 
   // ---- Google Sheet import (preview -> commit) ----
   importPreview: (sheetUrl: string) =>

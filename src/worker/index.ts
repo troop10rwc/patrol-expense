@@ -15,6 +15,7 @@ import type {
   SlackReceipt,
   SlackReceiptFile,
   SlackReceiptStatus,
+  UnitPayee,
 } from "../shared/types.ts";
 import { diffBundles } from "../shared/diff.ts";
 import { slugify } from "../shared/slug.ts";
@@ -28,10 +29,11 @@ import { seedWinterLodge } from "./seed.ts";
 import { buildStatement } from "./statement.ts";
 import { buildNotice, buildPublicStatement, newLinkToken } from "./notice.ts";
 import { requireAuth, type AuthBindings, type Identity } from "./auth.ts";
-import { sendNotice, worthSending } from "./mail.ts";
+import { sendNotice, sendUnitNotice, worthSending } from "./mail.ts";
 import { handleEmailEvents } from "./events.ts";
 import { handleInboundEmail } from "./inbound.ts";
-import { handleSlackInteraction, notifyReviewed, verifySlackSignature } from "./slack.ts";
+import { handleSlackInteraction, notifyReviewed, notifyUnitExpense, verifySlackSignature } from "./slack.ts";
+import { buildUnitNotice, getUnitExpense, listUnitExpenses, unitStatement, type UnitExpenseRow } from "./unit.ts";
 import { MAX_ATTACHMENT_BYTES, validateAttachment, safeFilename } from "./attachments.ts";
 import { BASE_PATH } from "../shared/constants.ts";
 
@@ -1266,6 +1268,268 @@ api.post("/slack-receipts/:rid/reject", async (c) => {
   return c.json({ ok: true });
 });
 
+// ---- unit expenses (non-trip reimbursements) ----
+// One member fronted something for the troop and gets it back. Added here by a
+// signed-in leader (lands approved), or queued from Slack's "Add as unit
+// expense" shortcut (lands pending, inert until approved below). See unit.ts.
+
+api.get("/unit-expenses", async (c) => c.json(await listUnitExpenses(c.env.DB)));
+
+// Who can be reimbursed: roster adults with an email, since email is how the
+// expense finds its way onto their statement.
+api.get("/unit-expenses/payees", async (c) => {
+  const roster = await fetchRoster(c.env.ROSTER, await fetchUnitNames(c.env.ROSTER)).catch(() => []);
+  const seen = new Set<string>();
+  const payees: UnitPayee[] = [];
+  for (const m of roster) {
+    const email = m.email?.trim();
+    if (m.type !== "adult" || !email || seen.has(email.toLowerCase())) continue;
+    seen.add(email.toLowerCase());
+    payees.push({ name: m.name, email });
+  }
+  return c.json(payees);
+});
+
+/** Validate the editable fields shared by add, edit, and approve. */
+function unitFields(b: { payee_email?: unknown; payee_name?: unknown; description?: unknown; amount?: unknown; spent_on?: unknown }) {
+  const payee_email = typeof b.payee_email === "string" ? b.payee_email.trim() : "";
+  const payee_name = typeof b.payee_name === "string" ? b.payee_name.trim() : "";
+  const description = typeof b.description === "string" ? b.description.trim() : "";
+  const amount = Number(b.amount);
+  const spent_on = typeof b.spent_on === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.spent_on) ? b.spent_on : null;
+  if (!payee_email || !/^[^@\s]+@[^@\s]+$/.test(payee_email) || !payee_name) return { error: "pick who to reimburse" } as const;
+  if (!description) return { error: "say what it was for" } as const;
+  if (!Number.isFinite(amount) || amount <= 0) return { error: "amount must be a positive number" } as const;
+  return { payee_email, payee_name, description: description.slice(0, 200), amount: Math.round(amount * 100) / 100, spent_on };
+}
+
+async function storeUnitAttachment(env: Bindings, unitExpenseId: number, file: File): Promise<void> {
+  const filename = safeFilename(file.name);
+  const key = `unit/${unitExpenseId}/${crypto.randomUUID()}-${filename}`;
+  await env.RECEIPTS.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+  await env.DB.prepare(
+    "INSERT INTO unit_expense_files (unit_expense_id, r2_key, filename, content_type, size) VALUES (?, ?, ?, ?, ?)",
+  )
+    .bind(unitExpenseId, key, filename, file.type, file.size)
+    .run();
+}
+
+// Add one directly. JSON, or multipart with the same fields plus `files`. A
+// leader typing it in is the approval, so it lands approved.
+api.post("/unit-expenses", async (c) => {
+  const ct = c.req.header("content-type") ?? "";
+  let raw: Record<string, unknown>;
+  let files: File[] = [];
+  if (ct.includes("multipart/form-data")) {
+    const form = await c.req.formData();
+    raw = Object.fromEntries(["payee_email", "payee_name", "description", "amount", "spent_on"].map((k) => [k, form.get(k) ?? undefined]));
+    files = form.getAll("files").filter((f): f is File => f instanceof File);
+    for (const f of files) {
+      const err = validateAttachment(f);
+      if (err) return c.json(bad(err), 400);
+    }
+  } else {
+    raw = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  }
+  const f = unitFields(raw);
+  if ("error" in f) return c.json(bad(f.error!), 400);
+
+  const user = c.get("user").email;
+  const ins = await c.env.DB.prepare(
+    `INSERT INTO unit_expenses
+       (payee_email, payee_name, description, amount, spent_on, status, source, created_by, reviewed_by, reviewed_at)
+     VALUES (?, ?, ?, ?, ?, 'approved', 'app', ?, ?, datetime('now'))
+     RETURNING id`,
+  )
+    .bind(f.payee_email, f.payee_name, f.description, f.amount, f.spent_on, user, user)
+    .first<{ id: number }>();
+  for (const file of files) await storeUnitAttachment(c.env, ins!.id, file);
+  return c.json(await listUnitExpenses(c.env.DB), 201);
+});
+
+// Correct the details. A paid expense is history — it changed hands at that
+// amount — so it's locked; mark it unpaid first if it truly needs fixing.
+api.patch("/unit-expenses/:id", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  if (row.status === "paid") return c.json(bad("it's already been paid — mark it unpaid before editing"), 409);
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const f = unitFields({ ...row, ...b });
+  if ("error" in f) return c.json(bad(f.error!), 400);
+  await c.env.DB.prepare(
+    "UPDATE unit_expenses SET payee_email = ?, payee_name = ?, description = ?, amount = ?, spent_on = ? WHERE id = ?",
+  )
+    .bind(f.payee_email, f.payee_name, f.description, f.amount, f.spent_on, row.id)
+    .run();
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+/**
+ * Approve a pending (Slack-submitted) unit expense: the only place one becomes
+ * money. The leader can correct anything first, and MUST name a payee if Slack
+ * couldn't match the one picked in the modal to a troop member.
+ */
+api.post("/unit-expenses/:id/approve", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  if (row.status !== "pending") return c.json(bad(`that expense was already ${row.status}`), 409);
+  const b = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  const f = unitFields({ ...row, ...b });
+  if ("error" in f) return c.json(bad(f.error!), 400);
+  await c.env.DB.prepare(
+    `UPDATE unit_expenses
+        SET payee_email = ?, payee_name = ?, description = ?, amount = ?, spent_on = ?,
+            status = 'approved', reviewed_by = ?, reviewed_at = datetime('now')
+      WHERE id = ? AND status = 'pending'`,
+  )
+    .bind(f.payee_email, f.payee_name, f.description, f.amount, f.spent_on, c.get("user").email, row.id)
+    .run();
+  c.executionCtx.waitUntil(notifyUnitExpense(c.env, { ...row, ...f }, "approved", null).catch(() => {}));
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+/** Turn a pending one down. As with Slack receipts, the photo goes with it. */
+api.post("/unit-expenses/:id/reject", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  if (row.status !== "pending") return c.json(bad(`that expense was already ${row.status}`), 409);
+  const b = await c.req.json<{ note?: string }>().catch((): { note?: string } => ({}));
+  const note = (b.note ?? "").trim().slice(0, 500) || null;
+  await deleteUnitFiles(c.env, row.id);
+  await c.env.DB.prepare(
+    "UPDATE unit_expenses SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
+  )
+    .bind(note, c.get("user").email, row.id)
+    .run();
+  c.executionCtx.waitUntil(notifyUnitExpense(c.env, row, "rejected", note).catch(() => {}));
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+// Record the payout (or undo that record). Only an approved expense can be paid.
+api.post("/unit-expenses/:id/paid", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  const b = await c.req.json<{ paid?: boolean; note?: string }>().catch((): { paid?: boolean; note?: string } => ({}));
+  if (b.paid === false) {
+    if (row.status !== "paid") return c.json(bad("that expense isn't marked paid"), 409);
+    await c.env.DB.prepare(
+      "UPDATE unit_expenses SET status = 'approved', paid_at = NULL, paid_by = NULL, paid_note = NULL WHERE id = ?",
+    )
+      .bind(row.id)
+      .run();
+    return c.json(await listUnitExpenses(c.env.DB));
+  }
+  if (row.status !== "approved") return c.json(bad(`only an approved expense can be paid (this one is ${row.status})`), 409);
+  const note = (b.note ?? "").trim().slice(0, 200) || null;
+  await c.env.DB.prepare(
+    "UPDATE unit_expenses SET status = 'paid', paid_at = datetime('now'), paid_by = ?, paid_note = ? WHERE id = ?",
+  )
+    .bind(c.get("user").email, note, row.id)
+    .run();
+  c.executionCtx.waitUntil(notifyUnitExpense(c.env, row, "paid", note).catch(() => {}));
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+async function deleteUnitFiles(env: Bindings, unitExpenseId: number): Promise<void> {
+  const { results } = await env.DB.prepare("SELECT r2_key FROM unit_expense_files WHERE unit_expense_id = ?")
+    .bind(unitExpenseId)
+    .all<{ r2_key: string }>();
+  const keys = (results ?? []).map((r) => r.r2_key);
+  if (keys.length) await env.RECEIPTS.delete(keys);
+  await env.DB.prepare("DELETE FROM unit_expense_files WHERE unit_expense_id = ?").bind(unitExpenseId).run();
+}
+
+api.delete("/unit-expenses/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  await deleteUnitFiles(c.env, id);
+  await c.env.DB.prepare("DELETE FROM unit_expenses WHERE id = ?").bind(id).run();
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+api.post("/unit-expenses/:id/files", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  const form = await c.req.formData();
+  const files = form.getAll("files").filter((f): f is File => f instanceof File);
+  if (files.length === 0) return c.json(bad("no files provided"), 400);
+  for (const f of files) {
+    const err = validateAttachment(f);
+    if (err) return c.json(bad(err), 400);
+  }
+  for (const f of files) await storeUnitAttachment(c.env, row.id, f);
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+// Same authenticated, streamed-through-the-Worker treatment as every receipt.
+api.get("/unit-expense-files/:fid", async (c) => {
+  const row = await c.env.DB
+    .prepare("SELECT r2_key, filename, content_type FROM unit_expense_files WHERE id = ?")
+    .bind(Number(c.req.param("fid")))
+    .first<{ r2_key: string; filename: string; content_type: string }>();
+  if (!row) return c.json(bad("file not found"), 404);
+  const obj = await c.env.RECEIPTS.get(row.r2_key);
+  if (!obj) return c.json(bad("file not found"), 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("Content-Type", row.content_type);
+  headers.set("Content-Disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+  headers.set("Cache-Control", "private, max-age=3600");
+  return new Response(obj.body, { headers });
+});
+
+api.delete("/unit-expense-files/:fid", async (c) => {
+  const row = await c.env.DB.prepare("SELECT r2_key FROM unit_expense_files WHERE id = ?")
+    .bind(Number(c.req.param("fid")))
+    .first<{ r2_key: string }>();
+  if (!row) return c.json(bad("file not found"), 404);
+  await c.env.RECEIPTS.delete(row.r2_key);
+  await c.env.DB.prepare("DELETE FROM unit_expense_files WHERE id = ?").bind(Number(c.req.param("fid"))).run();
+  return c.json(await listUnitExpenses(c.env.DB));
+});
+
+/** Render the email a unit expense warrants right now (approved or paid). */
+async function unitNoticeFor(env: Bindings, row: UnitExpenseRow, reqUrl: string) {
+  const { outstanding } = await unitStatement(env.DB, row.payee_email);
+  return buildUnitNotice(row, `${new URL(reqUrl).origin}${BASE_PATH}/me`, outstanding);
+}
+
+// Preview, so the treasurer sees exactly what will go out before it does.
+api.get("/unit-expenses/:id/notice", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  const notice = await unitNoticeFor(c.env, row, c.req.url);
+  if (!notice) return c.json(bad("only an approved or paid expense has anything to tell them"), 422);
+  return c.json(notice);
+});
+
+// Send it. Rebuilt server-side from the row, never taken from the client, and a
+// repeat of the same news (approved twice, paid twice) needs ?resend=1.
+api.post("/unit-expenses/:id/notice/send", async (c) => {
+  const row = await getUnitExpense(c.env.DB, Number(c.req.param("id")));
+  if (!row) return c.json(bad("that unit expense is gone"), 404);
+  if (!c.env.MAIL_FROM) {
+    return c.json(bad("sending isn't configured yet — this app's domain still needs onboarding onto Cloudflare Email Sending"), 503);
+  }
+  const notice = await unitNoticeFor(c.env, row, c.req.url);
+  if (!notice) return c.json(bad("only an approved or paid expense has anything to tell them"), 422);
+  if (!(notice.to ?? "").trim()) return c.json(bad(`no email address on file for ${row.payee_name}`), 422);
+
+  if (c.req.query("resend") !== "1") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM unit_expense_sends WHERE unit_expense_id = ? AND kind = ? AND status NOT IN ('failed','rejected') LIMIT 1",
+    )
+      .bind(row.id, notice.kind)
+      .first<{ id: number }>();
+    if (prior) return c.json(bad("they've already been sent this — resend to send it again"), 409);
+  }
+
+  const outcome = await sendUnitNotice(c.env, row.id, notice, row.amount, c.get("user").email);
+  if (outcome.status === "failed") {
+    return c.json({ error: outcome.error_detail ?? "the message could not be sent", code: outcome.error_code }, 502);
+  }
+  return c.json({ ok: true, send_id: outcome.id, to: notice.to, status: outcome.status });
+});
+
 // What changed since the most recent snapshot (null when none exists yet).
 api.get("/trips/:id/changes", async (c) => {
   const tripId = Number(c.req.param("id"));
@@ -1704,8 +1968,14 @@ export default class ExpenseWorker extends WorkerEntrypoint<Bindings> {
     if (!e) return [];
     const EPS = 0.005;
     const statement = await buildStatement(this.env.DB, this.env.ROSTER, { email: e, name: e });
-    return statement.events
+    const owed: OutstandingExpense[] = statement.events
       .filter((ev) => ev.outstanding > EPS && ev.status !== "paid")
       .map((ev) => ({ tripName: ev.trip.name, outstanding: ev.outstanding, status: ev.status }));
+    // Approved unit expenses are owed too. "requested" is the nearest settlement
+    // state: agreed, not yet paid out.
+    if (statement.unitOutstanding > EPS) {
+      owed.push({ tripName: "Unit expenses", outstanding: statement.unitOutstanding, status: "requested" });
+    }
+    return owed;
   }
 }
