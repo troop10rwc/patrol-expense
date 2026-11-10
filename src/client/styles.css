@@ -38,7 +38,11 @@ body {
 
 /* Make the app root fill the viewport so the paper + topographic motif from
    theme.css covers the whole page, not just the content height. */
-.t10-app { min-height: 100vh; }
+.t10-app { min-height: 100vh; min-height: 100dvh; }
+
+/* Stop iOS Safari from inflating text when the phone turns to landscape —
+   that inflation is what made rows overrun the screen sideways. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 
 a { color: var(--t10-pine); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -266,6 +270,9 @@ small.hint, .hint { color: var(--t10-ink-soft); }
   position: fixed; inset: 0; background: rgba(27,33,24,.38);
   display: flex; align-items: flex-start; justify-content: center;
   padding: 12vh 16px; z-index: 100;
+  /* A modal taller than the screen (a phone on its side) scrolls rather than
+     losing its buttons off the bottom. */
+  overflow-y: auto; overscroll-behavior: contain;
 }
 .modal {
   background: var(--t10-surface); border: 1px solid var(--t10-line); border-radius: var(--t10-r-lg);
@@ -582,4 +589,74 @@ label.fld textarea {
   font: inherit; font-family: var(--t10-font-body); font-size: var(--t10-fs-sm);
   font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--t10-ink);
   width: 100%; resize: vertical;
+}
+
+/* ===================================================================== Phone
+   The treasurer works from a phone, in both orientations. Two rules hold the
+   page to the screen: nothing but a table's own box may be wider than the
+   viewport (wide tables sit in .table-scroll and pan inside their card), and
+   form fields are never small enough for iOS to zoom in on focus — once Safari
+   zooms, the page stays zoomed and no longer fits. */
+
+/* The shared top nav (kit <BackOfficeTopNav>) runs ~45px past a phone's width,
+   which let every page pan sideways. Let the app links scroll within the bar
+   instead, so "Sign out" stays on screen. */
+@media (max-width: 560px) {
+  .appnav__inner { gap: 8px; padding: 0 12px; }
+  .appnav__spacer { display: none; }
+  .appnav__products {
+    flex: 1 1 auto; min-width: 0; overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .appnav__products::-webkit-scrollbar { display: none; }
+  .appnav__product { padding: 7px 8px; white-space: nowrap; }
+  .appnav__signout { padding: 5px 9px; }
+}
+
+/* Phone on its side: ~375px of height. A sticky 59px bar is a sixth of it, so
+   let the bar scroll away with the page. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .appnav { position: static; }
+  .modal-backdrop { padding: 12px 16px; }
+}
+
+@media (max-width: 600px) {
+  .wrap { padding: 14px 12px 48px; }
+  .card { padding: 14px 12px; margin-bottom: 12px; }
+  th, td { padding: 8px 8px; }
+  table.trips td, table.trips th { padding: 9px 8px; }
+  header.app { gap: 10px; }
+  header.app .row { gap: 6px; }
+  .tabs { margin: 12px 0 14px; }
+  .tabs button { padding: 9px 10px; }
+  .kpi { gap: 16px; }
+  .eq { gap: 8px 12px; }
+  .term { gap: 12px; }
+  input.name-input { max-width: 100%; }
+  .modal-backdrop { padding: 16px 12px; }
+  .modal { padding: 16px; }
+  .stmt-total-amt { font-size: 34px; }
+}
+
+/* Wide tables pan inside their card. On the reimbursement sheet the Adult
+   column stays pinned while the figures slide past, so a row never loses the
+   name it belongs to. */
+@media (max-width: 760px) {
+  .table-scroll { -webkit-overflow-scrolling: touch; }
+  table.sticky-first > thead > tr > th:first-child,
+  table.sticky-first > tbody > tr > td:first-child:not([colspan]) {
+    position: sticky; left: 0; z-index: 1;
+    background: var(--t10-surface);
+    box-shadow: inset -1px 0 0 var(--t10-line-soft);
+  }
+  table.sticky-first > tbody > tr.row-open > td:first-child { background: var(--t10-surface-3); }
+}
+
+/* Touch screens: 16px is the size below which iOS zooms into a focused field.
+   !important because label.fld and friends set the desktop size with higher
+   specificity; the trip title is already larger, so it's left alone. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not(.title-input),
+  select, textarea { font-size: 16px !important; }
+  input.sm { width: 92px; }
 }

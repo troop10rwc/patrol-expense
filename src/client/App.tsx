@@ -180,46 +180,48 @@ function IndexPage() {
         </div>
       ) : (
         <div className="card">
-          <table className="trips">
-            <thead>
-              <tr>
-                <th>Trip</th>
-                <th>Date</th>
-                <th>Planning doc</th>
-                <th>Slack channel</th>
-                <th className="num">Total cost</th>
-                <th className="num">Reimbursed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summaries.map((s) => (
-                <tr key={s.trip.uuid}>
-                  <td>
-                    <a className="trip-link" href={appHref(`/${s.trip.uuid}/${s.trip.slug}#expenses`)}>
-                      {s.trip.name}
-                    </a>
-                  </td>
-                  <td className="hint">{s.trip.trip_date ?? "—"}</td>
-                  <td>
-                    {s.trip.planning_doc_url
-                      ? <a href={s.trip.planning_doc_url} target="_blank" rel="noreferrer">Doc ↗</a>
-                      : <span className="hint">—</span>}
-                  </td>
-                  <td>
-                    {s.trip.slack_url
-                      ? <a href={s.trip.slack_url} target="_blank" rel="noreferrer">Channel ↗</a>
-                      : <span className="hint">—</span>}
-                  </td>
-                  <td className="num">{money(s.totalCost)}</td>
-                  <td className="num">
-                    {s.settleTotal > 0
-                      ? <span className={`pill ${s.settleDone === s.settleTotal ? "pill-new" : ""}`}>{s.settleDone}/{s.settleTotal} settled</span>
-                      : <span className="hint">—</span>}
-                  </td>
+          <div className="table-scroll">
+            <table className="trips">
+              <thead>
+                <tr>
+                  <th>Trip</th>
+                  <th>Date</th>
+                  <th>Planning doc</th>
+                  <th>Slack channel</th>
+                  <th className="num">Total cost</th>
+                  <th className="num">Reimbursed</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {summaries.map((s) => (
+                  <tr key={s.trip.uuid}>
+                    <td>
+                      <a className="trip-link" href={appHref(`/${s.trip.uuid}/${s.trip.slug}#expenses`)}>
+                        {s.trip.name}
+                      </a>
+                    </td>
+                    <td className="hint">{s.trip.trip_date ?? "—"}</td>
+                    <td>
+                      {s.trip.planning_doc_url
+                        ? <a href={s.trip.planning_doc_url} target="_blank" rel="noreferrer">Doc ↗</a>
+                        : <span className="hint">—</span>}
+                    </td>
+                    <td>
+                      {s.trip.slack_url
+                        ? <a href={s.trip.slack_url} target="_blank" rel="noreferrer">Channel ↗</a>
+                        : <span className="hint">—</span>}
+                    </td>
+                    <td className="num">{money(s.totalCost)}</td>
+                    <td className="num">
+                      {s.settleTotal > 0
+                        ? <span className={`pill ${s.settleDone === s.settleTotal ? "pill-new" : ""}`}>{s.settleDone}/{s.settleTotal} settled</span>
+                        : <span className="hint">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
@@ -455,31 +457,33 @@ function FamiliesPage() {
           {shown.length === 0 ? <p className="empty">{rows.length > 0 ? "No matches."
             : all ? "No households in the roster units your trips use."
             : "We couldn't match your sign-in to a youth's guardian in the roster. If that looks wrong, ask a leader to check the roster."}</p> : (
-            <table className="trips">
-              <thead>
-                <tr>
-                  <th>Household</th>
-                  <th>Youth</th>
-                  <th>Pays &amp; receives</th>
-                  <th className="num">Trips</th>
-                  <th className="num">Net</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map(({ household: h, trips, outstanding }) => (
-                  <tr key={h.id}>
-                    <td><a className="trip-link" href={appHref(`/families/${encodeURIComponent(h.id)}`)}>{h.name}</a></td>
-                    <td className="hint">{h.youth.map((y) => y.name).join(", ")}</td>
-                    <td>{h.payer ? h.payer.name : <span className="pill pill-warn">no guardian on file</span>}</td>
-                    <td className="num">{trips || <span className="hint">—</span>}</td>
-                    <td className={`num ${outstanding < -0.005 ? "neg" : ""}`}>
-                      {Math.abs(outstanding) < 0.005 ? <span className="hint">settled</span>
-                        : outstanding > 0 ? `owed ${money(outstanding)}` : `owes ${money(-outstanding)}`}
-                    </td>
+            <div className="table-scroll">
+              <table className="trips">
+                <thead>
+                  <tr>
+                    <th>Household</th>
+                    <th>Youth</th>
+                    <th>Pays &amp; receives</th>
+                    <th className="num">Trips</th>
+                    <th className="num">Net</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {shown.map(({ household: h, trips, outstanding }) => (
+                    <tr key={h.id}>
+                      <td><a className="trip-link" href={appHref(`/families/${encodeURIComponent(h.id)}`)}>{h.name}</a></td>
+                      <td className="hint">{h.youth.map((y) => y.name).join(", ")}</td>
+                      <td>{h.payer ? h.payer.name : <span className="pill pill-warn">no guardian on file</span>}</td>
+                      <td className="num">{trips || <span className="hint">—</span>}</td>
+                      <td className={`num ${outstanding < -0.005 ? "neg" : ""}`}>
+                        {Math.abs(outstanding) < 0.005 ? <span className="hint">settled</span>
+                          : outstanding > 0 ? `owed ${money(outstanding)}` : `owes ${money(-outstanding)}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
           <p className="hint">Net is live across every trip (including ones not yet snapshotted) plus approved unit expenses. Positive means the troop owes the family.</p>
         </div>
@@ -786,84 +790,86 @@ function UnitExpenseTable({
   }
 
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Payee</th><th>What</th><th>Date</th><th className="num">Amount</th>
-          <th>Receipt</th><th>Status</th><th>Email</th><th />
-        </tr>
-      </thead>
-      <tbody>
-        {items.map((i) => {
-          const chip = i.lastSend ? unitDeliveryChip(i.lastSend) : null;
-          return (
-            <tr key={i.id} className={i.status === "rejected" ? "zero" : ""}>
-              <td>{i.payee_name}<div className="hint">{i.payee_email ?? "no email"}</div></td>
-              <td>
-                {i.slack_permalink
-                  ? <a href={i.slack_permalink} target="_blank" rel="noreferrer">{i.description} ↗</a>
-                  : i.description}
-                {i.review_note && <div className="hint">{i.review_note}</div>}
-              </td>
-              <td className="hint">{i.spent_on ?? fmtTime(i.created_at)}</td>
-              <td className="num">{money(i.amount)}</td>
-              <td>
-                {i.files.length === 0
-                  ? <span className="hint">—</span>
-                  : i.files.map((f) => (
-                    <a key={f.id} href={api.unitExpenseFileUrl(f.id)} target="_blank" rel="noreferrer" title={f.filename}>
-                      📎{" "}
-                    </a>
-                  ))}
-              </td>
-              <td>
-                {i.status === "approved" && (
-                  <button className="btn ghost sm-btn" disabled={busy} onClick={() => markPaid(i)}>Mark paid</button>
-                )}
-                {i.status === "paid" && (
-                  <>
-                    <span className="pill pill-good" title={i.paid_by ? `by ${i.paid_by}` : undefined}>
-                      paid {i.paid_at ? fmtTime(i.paid_at) : ""}
-                    </span>
-                    {i.paid_note && <div className="hint">{i.paid_note}</div>}
-                  </>
-                )}
-                {i.status === "rejected" && <span className="pill">turned down</span>}
-              </td>
-              <td className="notice-cell">
-                {(i.status === "approved" || i.status === "paid") && (
-                  <>
-                    <button className="btn ghost sm-btn" disabled={!i.payee_email} onClick={() => onEmail(i)}>✉ Email</button>
-                    {chip && <span className={`pill ${chip.tone}`} title={chip.title}>{chip.label}</span>}
-                  </>
-                )}
-              </td>
-              <td>
-                {i.status === "paid" ? (
-                  <button
-                    className="btn ghost sm-btn"
-                    disabled={busy}
-                    title="Undo the paid mark (it goes back to owed)"
-                    onClick={() => confirm(`Mark ${i.description} as not paid? It goes back to owed.`) && run(() => api.setUnitExpensePaid(i.id, false))}
-                  >
-                    Undo
-                  </button>
-                ) : (
-                  <button
-                    className="btn ghost danger sm-btn"
-                    disabled={busy}
-                    title="Delete this expense and its receipt"
-                    onClick={() => confirm(`Delete ${i.description} (${money(i.amount)}) for ${i.payee_name}? Its receipt is deleted too.`) && run(() => api.deleteUnitExpense(i.id))}
-                  >
-                    ×
-                  </button>
-                )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Payee</th><th>What</th><th>Date</th><th className="num">Amount</th>
+            <th>Receipt</th><th>Status</th><th>Email</th><th />
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i) => {
+            const chip = i.lastSend ? unitDeliveryChip(i.lastSend) : null;
+            return (
+              <tr key={i.id} className={i.status === "rejected" ? "zero" : ""}>
+                <td>{i.payee_name}<div className="hint">{i.payee_email ?? "no email"}</div></td>
+                <td>
+                  {i.slack_permalink
+                    ? <a href={i.slack_permalink} target="_blank" rel="noreferrer">{i.description} ↗</a>
+                    : i.description}
+                  {i.review_note && <div className="hint">{i.review_note}</div>}
+                </td>
+                <td className="hint">{i.spent_on ?? fmtTime(i.created_at)}</td>
+                <td className="num">{money(i.amount)}</td>
+                <td>
+                  {i.files.length === 0
+                    ? <span className="hint">—</span>
+                    : i.files.map((f) => (
+                      <a key={f.id} href={api.unitExpenseFileUrl(f.id)} target="_blank" rel="noreferrer" title={f.filename}>
+                        📎{" "}
+                      </a>
+                    ))}
+                </td>
+                <td>
+                  {i.status === "approved" && (
+                    <button className="btn ghost sm-btn" disabled={busy} onClick={() => markPaid(i)}>Mark paid</button>
+                  )}
+                  {i.status === "paid" && (
+                    <>
+                      <span className="pill pill-good" title={i.paid_by ? `by ${i.paid_by}` : undefined}>
+                        paid {i.paid_at ? fmtTime(i.paid_at) : ""}
+                      </span>
+                      {i.paid_note && <div className="hint">{i.paid_note}</div>}
+                    </>
+                  )}
+                  {i.status === "rejected" && <span className="pill">turned down</span>}
+                </td>
+                <td className="notice-cell">
+                  {(i.status === "approved" || i.status === "paid") && (
+                    <>
+                      <button className="btn ghost sm-btn" disabled={!i.payee_email} onClick={() => onEmail(i)}>✉ Email</button>
+                      {chip && <span className={`pill ${chip.tone}`} title={chip.title}>{chip.label}</span>}
+                    </>
+                  )}
+                </td>
+                <td>
+                  {i.status === "paid" ? (
+                    <button
+                      className="btn ghost sm-btn"
+                      disabled={busy}
+                      title="Undo the paid mark (it goes back to owed)"
+                      onClick={() => confirm(`Mark ${i.description} as not paid? It goes back to owed.`) && run(() => api.setUnitExpensePaid(i.id, false))}
+                    >
+                      Undo
+                    </button>
+                  ) : (
+                    <button
+                      className="btn ghost danger sm-btn"
+                      disabled={busy}
+                      title="Delete this expense and its receipt"
+                      onClick={() => confirm(`Delete ${i.description} (${money(i.amount)}) for ${i.payee_name}? Its receipt is deleted too.`) && run(() => api.deleteUnitExpense(i.id))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -1179,24 +1185,26 @@ function PublicStatementPage({ token }: { token: string }) {
       {st.otherEvents.length > 0 && (
         <div className="card">
           <h2>Everything you owe</h2>
-          <table>
-            <tbody>
-              <tr>
-                <td>{n.trip.name} <span className="hint">(this statement)</span></td>
-                <td className="num">{accounting(n.net)}</td>
-              </tr>
-              {st.otherEvents.map((e) => (
-                <tr key={e.name}>
-                  <td>{e.name} <span className="hint">{e.trip_date ?? "current figures"}</span></td>
-                  <td className="num">{accounting(e.outstanding)}</td>
+          <div className="table-scroll">
+            <table>
+              <tbody>
+                <tr>
+                  <td>{n.trip.name} <span className="hint">(this statement)</span></td>
+                  <td className="num">{accounting(n.net)}</td>
                 </tr>
-              ))}
-              <tr className="shared-total">
-                <td><strong>Total</strong></td>
-                <td className="num"><strong className={st.grandTotal < 0 ? "neg" : "pos"}>{accounting(st.grandTotal)}</strong></td>
-              </tr>
-            </tbody>
-          </table>
+                {st.otherEvents.map((e) => (
+                  <tr key={e.name}>
+                    <td>{e.name} <span className="hint">{e.trip_date ?? "current figures"}</span></td>
+                    <td className="num">{accounting(e.outstanding)}</td>
+                  </tr>
+                ))}
+                <tr className="shared-total">
+                  <td><strong>Total</strong></td>
+                  <td className="num"><strong className={st.grandTotal < 0 ? "neg" : "pos"}>{accounting(st.grandTotal)}</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <p><small className="hint">
             Amounts in parentheses are what you owe. Other trips show their current figures, which
             can still move as those trips collect expenses.
@@ -1249,52 +1257,58 @@ function PublicStatementPage({ token }: { token: string }) {
             Receipts you paid — {money(n.paid)}
             {n.reimbursed > 0 && <span className="hint"> · {money(n.reimbursed)} already paid back</span>}
           </h2>
-          <table>
-            <tbody>
-              {n.paidLines.map((l, i) => (
-                <tr key={i} className={l.reimbursed ? "reimbursed" : undefined}>
-                  <td>{l.description}</td>
-                  <td className="hint">
-                    {l.groupName}
-                    {l.reimbursed && <span className="pill pill-new" style={{ marginLeft: 6 }}>paid back</span>}
-                  </td>
-                  <td className="num">{money(l.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="table-scroll">
+            <table>
+              <tbody>
+                {n.paidLines.map((l, i) => (
+                  <tr key={i} className={l.reimbursed ? "reimbursed" : undefined}>
+                    <td>{l.description}</td>
+                    <td className="hint">
+                      {l.groupName}
+                      {l.reimbursed && <span className="pill pill-new" style={{ marginLeft: 6 }}>paid back</span>}
+                    </td>
+                    <td className="num">{money(l.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
       {n.prepayLines.length > 0 && (
         <div className="card">
           <h2>Already reimbursed — {money(n.prepay)}</h2>
-          <table>
-            <tbody>
-              {n.prepayLines.map((l, i) => (
-                <tr key={i}><td>{l.note || "Reimbursement"}</td><td className="num">{money(l.amount)}</td></tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="table-scroll">
+            <table>
+              <tbody>
+                {n.prepayLines.map((l, i) => (
+                  <tr key={i}><td>{l.note || "Reimbursement"}</td><td className="num">{money(l.amount)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
       <div className="card">
         <h2>How this adds up</h2>
-        <table>
-          <tbody>
-            <tr><td>Receipts you paid</td><td className="num">{money(n.paid)}</td></tr>
-            <tr><td>Your share of costs</td><td className="num">−{money(n.owed)}</td></tr>
-            {n.reimbursed > 0 && (
-              <tr><td>Receipts already paid back to you</td><td className="num">−{money(n.reimbursed)}</td></tr>
-            )}
-            {n.prepay > 0 && <tr><td>Already reimbursed to you</td><td className="num">−{money(n.prepay)}</td></tr>}
-            <tr className="shared-total">
-              <td><strong>{owes ? "You owe" : owed ? "Owed to you" : "Settled"}</strong></td>
-              <td className="num"><strong className={owes ? "neg" : "pos"}>{money(Math.abs(n.net))}</strong></td>
-            </tr>
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table>
+            <tbody>
+              <tr><td>Receipts you paid</td><td className="num">{money(n.paid)}</td></tr>
+              <tr><td>Your share of costs</td><td className="num">−{money(n.owed)}</td></tr>
+              {n.reimbursed > 0 && (
+                <tr><td>Receipts already paid back to you</td><td className="num">−{money(n.reimbursed)}</td></tr>
+              )}
+              {n.prepay > 0 && <tr><td>Already reimbursed to you</td><td className="num">−{money(n.prepay)}</td></tr>}
+              <tr className="shared-total">
+                <td><strong>{owes ? "You owe" : owed ? "Owed to you" : "Settled"}</strong></td>
+                <td className="num"><strong className={owes ? "neg" : "pos"}>{money(Math.abs(n.net))}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {owes && n.paymentInstructions && (
@@ -1587,27 +1601,29 @@ function ImportModal({ onClose }: { onClose: () => void }) {
               {preview.expenseGroups.map((g) => (
                 <div key={g.name} style={{ marginBottom: 12 }}>
                   <div><strong>{g.name}</strong> <span className="hint">· {g.memberRefs.length} attending · {money(g.total)}</span></div>
-                  <table className="trips">
-                    <tbody>
-                      {g.receipts.length === 0 && <tr><td className="hint" colSpan={3}>No receipts on this tab.</td></tr>}
-                      {g.receipts.map((rc, i) => (
-                        <tr key={i}>
-                          <td>{rc.description}</td>
-                          <td className="num">{money(rc.amount)}</td>
-                          <td>
-                            <select
-                              value={rc.payerRef ?? ""}
-                              className={rc.amount > 0 && !rc.payerRef ? "needs" : ""}
-                              onChange={(e) => setPayer(g.name, i, e.target.value)}
-                            >
-                              <option value="">— choose payer —</option>
-                              {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <div className="table-scroll">
+                    <table className="trips">
+                      <tbody>
+                        {g.receipts.length === 0 && <tr><td className="hint" colSpan={3}>No receipts on this tab.</td></tr>}
+                        {g.receipts.map((rc, i) => (
+                          <tr key={i}>
+                            <td>{rc.description}</td>
+                            <td className="num">{money(rc.amount)}</td>
+                            <td>
+                              <select
+                                value={rc.payerRef ?? ""}
+                                className={rc.amount > 0 && !rc.payerRef ? "needs" : ""}
+                                onChange={(e) => setPayer(g.name, i, e.target.value)}
+                              >
+                                <option value="">— choose payer —</option>
+                                {preview.people.map((p) => <option key={p.ref} value={p.ref}>{p.displayName}</option>)}
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1615,33 +1631,37 @@ function ImportModal({ onClose }: { onClose: () => void }) {
             {preview.travelGroups.length > 0 && (
               <div className="card" style={{ marginBottom: 12 }}>
                 <h3 style={{ marginTop: 0 }}>Travel</h3>
-                <table className="trips">
-                  <thead><tr><th>Route</th><th>From → To</th><th className="num">Round trip</th><th className="num">Drivers</th><th className="num">$/driver</th></tr></thead>
-                  <tbody>
-                    {preview.travelGroups.map((t) => (
-                      <tr key={t.name}>
-                        <td>{t.name}</td>
-                        <td className="hint">{(t.origin ?? "?").split(",")[0]} → {(t.destination ?? "?").split(",")[0]}</td>
-                        <td className="num">{t.roundTripMiles != null ? `${t.roundTripMiles} mi` : "—"}</td>
-                        <td className="num">{t.driverRefs.length}</td>
-                        <td className="num">{money(t.reimbursementPerDriver)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div className="table-scroll">
+                  <table className="trips">
+                    <thead><tr><th>Route</th><th>From → To</th><th className="num">Round trip</th><th className="num">Drivers</th><th className="num">$/driver</th></tr></thead>
+                    <tbody>
+                      {preview.travelGroups.map((t) => (
+                        <tr key={t.name}>
+                          <td>{t.name}</td>
+                          <td className="hint">{(t.origin ?? "?").split(",")[0]} → {(t.destination ?? "?").split(",")[0]}</td>
+                          <td className="num">{t.roundTripMiles != null ? `${t.roundTripMiles} mi` : "—"}</td>
+                          <td className="num">{t.driverRefs.length}</td>
+                          <td className="num">{money(t.reimbursementPerDriver)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
             {preview.prepayments.length > 0 && (
               <div className="card" style={{ marginBottom: 12 }}>
                 <h3 style={{ marginTop: 0 }}>Pre-reimbursed</h3>
-                <table className="trips">
-                  <tbody>
-                    {preview.prepayments.map((pp, i) => (
-                      <tr key={i}><td>{nameOf(pp.personRef)}</td><td className="num">{money(pp.amount)}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
+                <div className="table-scroll">
+                  <table className="trips">
+                    <tbody>
+                      {preview.prepayments.map((pp, i) => (
+                        <tr key={i}><td>{nameOf(pp.personRef)}</td><td className="num">{money(pp.amount)}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
@@ -1651,24 +1671,26 @@ function ImportModal({ onClose }: { onClose: () => void }) {
                 <p className="hint" style={{ marginTop: 0 }}>
                   Each person’s “Total Owed” on the Summary tab vs. the sum of its own line items. Red = the sheet shows a broken/mis-formatted value.
                 </p>
-                <table className="trips">
-                  <thead><tr><th>Person</th><th className="num">Summary shows</th><th className="num">Line items sum</th><th></th></tr></thead>
-                  <tbody>
-                    {preview.summary.map((s, i) => {
-                      const ok = s.parsedValue != null && Math.abs(s.parsedValue - s.recomputed) < 0.005;
-                      return (
-                        <tr key={i}>
-                          <td>{nameOf(s.personRef)}</td>
-                          <td className="num">
-                            {s.parsedValue == null ? <span className="flag-bad">{s.rawValue || "—"}</span> : money(s.parsedValue)}
-                          </td>
-                          <td className="num">{money(s.recomputed)}</td>
-                          <td>{ok ? <span className="pill">✓</span> : <span className="pill flag-warning">check</span>}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <div className="table-scroll">
+                  <table className="trips">
+                    <thead><tr><th>Person</th><th className="num">Summary shows</th><th className="num">Line items sum</th><th></th></tr></thead>
+                    <tbody>
+                      {preview.summary.map((s, i) => {
+                        const ok = s.parsedValue != null && Math.abs(s.parsedValue - s.recomputed) < 0.005;
+                        return (
+                          <tr key={i}>
+                            <td>{nameOf(s.personRef)}</td>
+                            <td className="num">
+                              {s.parsedValue == null ? <span className="flag-bad">{s.rawValue || "—"}</span> : money(s.parsedValue)}
+                            </td>
+                            <td className="num">{money(s.recomputed)}</td>
+                            <td>{ok ? <span className="pill">✓</span> : <span className="pill flag-warning">check</span>}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
 
@@ -2250,120 +2272,122 @@ function Reimbursement({ bundle, run, busy }: TabProps) {
         </label>
       </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Adult</th>
-            <th className="num">Paid</th>
-            <th className="num">Owes (share)</th>
-            <th className="num">Pre-reimbursed</th>
-            <th className="num">Reimbursed</th>
-            <th className="num">Net</th>
-            <th>Settlement</th>
-            <th>Notice</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const o = r.outstanding;
-            const label =
-              o > 0.005 ? <span className="pos">owed {money(o)}</span> :
-              o < -0.005 ? <span className="neg">owes {money(-o)}</span> :
-              <span className="settled">—</span>;
-            // Call out cells whose value moved since the last snapshot: keep the
-            // highlight, and show the explicit before → after underneath.
-            const rc = changeByPerson.get(r.person_id);
-            const open = openShares === r.person_id;
-            const cls = (f: string, base = "num") => rc?.fields.has(f) ? `${base} changed` : base;
-            const note = (f: string) => {
-              const c = rc?.fields.get(f);
-              return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
-            };
-            return (
-              <Fragment key={r.person_id}>
-              <tr className={`${!r.paid && !r.owed && !r.prepay && !r.reimbursed ? "zero" : ""}${rc?.added ? " row-added" : ""}${open ? " row-open" : ""}`}>
-                <td>
-                  <button
-                    type="button"
-                    className="name-toggle"
-                    aria-expanded={open}
-                    title={`Show what makes up ${r.name}'s share`}
-                    onClick={() => setOpenShares(open ? null : r.person_id)}
-                  >
-                    <span className="caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
-                    {r.name}
-                  </button>
-                  {r.code && <span className="hint"> ({r.code})</span>}
-                  {rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}
-                </td>
-                <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
-                <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
-                <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
-                {/* Receipts of theirs already handed back, marked one by one on
-                    the Expenses tab. Already netted out of the figure beside it. */}
-                <td className={cls("reimbursed")}>{r.reimbursed ? money(r.reimbursed) : ""}{note("reimbursed")}</td>
-                <td className={cls("outstanding")}>{label}</td>
-                <td className={rc?.fields.has("status") ? "changed" : ""}>
-                  <select
-                    className={`status-${r.status}`}
-                    value={r.status}
-                    disabled={busy}
-                    onChange={(e) =>
-                      run(() => api.setStatus(bundle.trip.id, r.person_id, e.target.value as SettlementStatus))
-                    }
-                  >
-                    {/* Direction-appropriate terminal state: the troop pays a
-                        person it owes; it receives from a person who owes it. */}
-                    <option value="none">—</option>
-                    <option value="requested">requested</option>
-                    {(o > 0.005 || r.status === "paid") && <option value="paid">paid</option>}
-                    {(o < -0.005 || r.status === "received") && <option value="received">received</option>}
-                  </select>
-                  {note("status")}
-                </td>
-                {/* Email is only meaningful when there's a balance to explain;
-                    a settled row has nothing to tell anyone. */}
-                <td className="notice-cell">
-                  {Math.abs(o) > 0.005 ? (
-                    <>
-                      <button className="btn ghost sm-btn" onClick={() => setNoticeFor(r)}>
-                        ✉ Email
-                      </button>
-                      {(() => {
-                        const link = noticeByPerson.get(r.person_id);
-                        if (!link) return null;
-                        const current = link.snapshot_id === snapshots[0]?.id;
-                        const d = deliveryChip(link);
-                        return (
-                          <span
-                            className={`pill ${d.tone}`}
-                            title={`${d.title}${current ? "" : " · from an older snapshot"}`}
-                          >
-                            {d.label}{current ? "" : " ·"}
-                          </span>
-                        );
-                      })()}
-                    </>
-                  ) : (
-                    <span className="hint">—</span>
-                  )}
-                </td>
-              </tr>
-              {open && (
-                <tr className="share-detail">
-                  <td colSpan={8}>
-                    <ShareBreakdown bundle={bundle} row={r} personById={personById} />
+      <div className="table-scroll">
+        <table className="sticky-first">
+          <thead>
+            <tr>
+              <th>Adult</th>
+              <th className="num">Paid</th>
+              <th className="num">Owes (share)</th>
+              <th className="num">Pre-reimbursed</th>
+              <th className="num">Reimbursed</th>
+              <th className="num">Net</th>
+              <th>Settlement</th>
+              <th>Notice</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const o = r.outstanding;
+              const label =
+                o > 0.005 ? <span className="pos">owed {money(o)}</span> :
+                o < -0.005 ? <span className="neg">owes {money(-o)}</span> :
+                <span className="settled">—</span>;
+              // Call out cells whose value moved since the last snapshot: keep the
+              // highlight, and show the explicit before → after underneath.
+              const rc = changeByPerson.get(r.person_id);
+              const open = openShares === r.person_id;
+              const cls = (f: string, base = "num") => rc?.fields.has(f) ? `${base} changed` : base;
+              const note = (f: string) => {
+                const c = rc?.fields.get(f);
+                return c ? <div className="diff-note">{fmtVal(f, c.from)} → {fmtVal(f, c.to)}</div> : null;
+              };
+              return (
+                <Fragment key={r.person_id}>
+                <tr className={`${!r.paid && !r.owed && !r.prepay && !r.reimbursed ? "zero" : ""}${rc?.added ? " row-added" : ""}${open ? " row-open" : ""}`}>
+                  <td>
+                    <button
+                      type="button"
+                      className="name-toggle"
+                      aria-expanded={open}
+                      title={`Show what makes up ${r.name}'s share`}
+                      onClick={() => setOpenShares(open ? null : r.person_id)}
+                    >
+                      <span className="caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+                      {r.name}
+                    </button>
+                    {r.code && <span className="hint"> ({r.code})</span>}
+                    {rc?.added && <span className="pill pill-new" style={{ marginLeft: 6 }}>new</span>}
+                  </td>
+                  <td className={cls("paid")}>{r.paid ? money(r.paid) : ""}{note("paid")}</td>
+                  <td className={cls("owed")}>{r.owed ? money(r.owed) : ""}{note("owed")}</td>
+                  <td className={cls("prepay")}>{r.prepay ? money(r.prepay) : ""}{note("prepay")}</td>
+                  {/* Receipts of theirs already handed back, marked one by one on
+                      the Expenses tab. Already netted out of the figure beside it. */}
+                  <td className={cls("reimbursed")}>{r.reimbursed ? money(r.reimbursed) : ""}{note("reimbursed")}</td>
+                  <td className={cls("outstanding")}>{label}</td>
+                  <td className={rc?.fields.has("status") ? "changed" : ""}>
+                    <select
+                      className={`status-${r.status}`}
+                      value={r.status}
+                      disabled={busy}
+                      onChange={(e) =>
+                        run(() => api.setStatus(bundle.trip.id, r.person_id, e.target.value as SettlementStatus))
+                      }
+                    >
+                      {/* Direction-appropriate terminal state: the troop pays a
+                          person it owes; it receives from a person who owes it. */}
+                      <option value="none">—</option>
+                      <option value="requested">requested</option>
+                      {(o > 0.005 || r.status === "paid") && <option value="paid">paid</option>}
+                      {(o < -0.005 || r.status === "received") && <option value="received">received</option>}
+                    </select>
+                    {note("status")}
+                  </td>
+                  {/* Email is only meaningful when there's a balance to explain;
+                      a settled row has nothing to tell anyone. */}
+                  <td className="notice-cell">
+                    {Math.abs(o) > 0.005 ? (
+                      <>
+                        <button className="btn ghost sm-btn" onClick={() => setNoticeFor(r)}>
+                          ✉ Email
+                        </button>
+                        {(() => {
+                          const link = noticeByPerson.get(r.person_id);
+                          if (!link) return null;
+                          const current = link.snapshot_id === snapshots[0]?.id;
+                          const d = deliveryChip(link);
+                          return (
+                            <span
+                              className={`pill ${d.tone}`}
+                              title={`${d.title}${current ? "" : " · from an older snapshot"}`}
+                            >
+                              {d.label}{current ? "" : " ·"}
+                            </span>
+                          );
+                        })()}
+                      </>
+                    ) : (
+                      <span className="hint">—</span>
+                    )}
                   </td>
                 </tr>
-              )}
-              </Fragment>
-            );
-          })}
-          {rows.length === 0 && (
-            <tr><td colSpan={8} className="empty">No activity yet.</td></tr>
-          )}
-        </tbody>
-      </table>
+                {open && (
+                  <tr className="share-detail">
+                    <td colSpan={8}>
+                      <ShareBreakdown bundle={bundle} row={r} personById={personById} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr><td colSpan={8} className="empty">No activity yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
       <p><small className="hint">
         Net = what they paid − their share of expenses − pre-reimbursements − receipts
         already paid back (marked on the Expenses tab).
@@ -2771,67 +2795,69 @@ function Corrections({
       {shown.length === 0 ? (
         <p className="hint">Nothing open — every reported correction has been dealt with.</p>
       ) : (
-        <table>
-          <thead>
-            <tr><th>From</th><th>What</th><th className="num">Amount</th><th>Details</th><th>Reported</th><th></th></tr>
-          </thead>
-          <tbody>
-            {shown.map((c) => (
-              <tr key={c.id} className={c.status === "resolved" ? "zero" : ""}>
-                <td>
-                  {c.personName}
-                  {c.reporter_name && c.reporter_name !== c.personName && (
-                    <div className="hint">sent by {c.reporter_name}</div>
-                  )}
-                  {/* An emailed reply is worth marking: it came back through the
-                      Reply-To on the notice, so the address it arrived from is
-                      also the fastest way to answer it. */}
-                  {c.source === "email" && (
-                    <div className="hint" title={c.email_subject ?? undefined}>
-                      ↩ replied from {c.from_email ?? "email"}
-                    </div>
-                  )}
-                </td>
-                <td>{CORRECTION_LABELS[c.kind]}</td>
-                <td className="num">{c.amount != null ? money(c.amount) : ""}</td>
-                <td className="correction-msg">
-                  {c.message}
-                  {c.attachments.length > 0 && (
-                    <div className="correction-photos">
-                      {c.attachments.map((a) => (
-                        <a
-                          key={a.id}
-                          href={api.correctionAttachmentUrl(a.id)}
-                          target="_blank"
-                          rel="noreferrer"
-                          title={`${a.filename} (${Math.round(a.size / 1024)} KB)`}
-                        >
-                          {a.content_type.startsWith("image/") ? (
-                            <img src={api.correctionAttachmentUrl(a.id)} alt={a.filename} />
-                          ) : (
-                            <span className="pill">📄 {a.filename}</span>
-                          )}
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                </td>
-                <td className="hint">{fmtTime(c.created_at)}</td>
-                <td className="num">
-                  {c.status === "open" ? (
-                    <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "resolved")}>
-                      Resolve
-                    </button>
-                  ) : (
-                    <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "open")}>
-                      Reopen
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr><th>From</th><th>What</th><th className="num">Amount</th><th>Details</th><th>Reported</th><th></th></tr>
+            </thead>
+            <tbody>
+              {shown.map((c) => (
+                <tr key={c.id} className={c.status === "resolved" ? "zero" : ""}>
+                  <td>
+                    {c.personName}
+                    {c.reporter_name && c.reporter_name !== c.personName && (
+                      <div className="hint">sent by {c.reporter_name}</div>
+                    )}
+                    {/* An emailed reply is worth marking: it came back through the
+                        Reply-To on the notice, so the address it arrived from is
+                        also the fastest way to answer it. */}
+                    {c.source === "email" && (
+                      <div className="hint" title={c.email_subject ?? undefined}>
+                        ↩ replied from {c.from_email ?? "email"}
+                      </div>
+                    )}
+                  </td>
+                  <td>{CORRECTION_LABELS[c.kind]}</td>
+                  <td className="num">{c.amount != null ? money(c.amount) : ""}</td>
+                  <td className="correction-msg">
+                    {c.message}
+                    {c.attachments.length > 0 && (
+                      <div className="correction-photos">
+                        {c.attachments.map((a) => (
+                          <a
+                            key={a.id}
+                            href={api.correctionAttachmentUrl(a.id)}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`${a.filename} (${Math.round(a.size / 1024)} KB)`}
+                          >
+                            {a.content_type.startsWith("image/") ? (
+                              <img src={api.correctionAttachmentUrl(a.id)} alt={a.filename} />
+                            ) : (
+                              <span className="pill">📄 {a.filename}</span>
+                            )}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td className="hint">{fmtTime(c.created_at)}</td>
+                  <td className="num">
+                    {c.status === "open" ? (
+                      <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "resolved")}>
+                        Resolve
+                      </button>
+                    ) : (
+                      <button className="btn ghost sm-btn" disabled={busy} onClick={() => setStatus(c.id, "open")}>
+                        Reopen
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       <p><small className="hint">
         Reported from the statement links emailed out of this tab, or replied straight back to the
@@ -3136,93 +3162,95 @@ function Snapshots({ bundle, changes, snapshots, reload }: SnapshotsProps) {
       {/* History — clicking a row expands the changes that went into that
           snapshot (its diff vs the previous snapshot) inline below it. */}
       {snapshots.length > 0 && (
-        <table>
-          <thead>
-            <tr><th>Taken</th><th>Label</th><th>By</th><th className="num">Total</th><th className="num">Outstanding</th><th></th></tr>
-          </thead>
-          <tbody>
-            {snapshots.map((s) => {
-              const isOpen = viewing?.id === s.id;
-              return (
-                <Fragment key={s.id}>
-                  <tr className={isOpen ? "snapshot-open" : ""}>
-                    <td><a href="#" onClick={(e) => { e.preventDefault(); open(s.id); }}>{isOpen ? "▾ " : "▸ "}{fmtTime(s.created_at)}</a></td>
-                    <td>{s.label || <span className="hint">—</span>}</td>
-                    <td>{s.created_by || <span className="hint">—</span>}</td>
-                    <td className="num">{money(s.totalExpenses)}</td>
-                    <td className="num">{money(s.outstanding)}</td>
-                    <td className="num snapshot-actions">
-                      <a href="#" title="Download this snapshot's reimbursement summary as CSV" onClick={(e) => { e.preventDefault(); downloadSummaryCsv(s); }}>⬇ CSV</a>
-                      <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
-                    </td>
-                  </tr>
-                  {isOpen && viewing && (() => {
-                    // Per-person net movement vs the previous snapshot, for the ± column.
-                    const netDelta = new Map<number, number>();
-                    for (const dr of viewingDiff?.diff?.paysheet.rows ?? []) {
-                      const o = dr.changes.find((c) => c.field === "outstanding");
-                      if (o && typeof o.from === "number" && typeof o.to === "number") netDelta.set(dr.person_id, round2(o.to - o.from));
-                    }
-                    const hasPrev = !!viewingDiff?.hasPrev;
-                    return (
-                      <tr className="snapshot-detail">
-                        <td colSpan={6}>
-                          <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
-                          {!hasPrev ? (
-                            <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
-                          ) : viewingDiff?.diff?.hasChanges ? (
-                            <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} netOf={netFromBundle(viewing.bundle)} mode="inputs" />
-                          ) : (
-                            <p className="hint">No changes from the previous snapshot.</p>
-                          )}
-                          <h4 style={{ margin: "10px 0 6px" }}>Reimbursement summary</h4>
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th>
-                                <th className="num">Pre-reimbursed</th><th className="num">Reimbursed</th><th className="num">Net</th>
-                                {hasPrev && <th className="num">± vs prev</th>}
-                                <th>Settlement</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay || r.reimbursed).map((r) => {
-                                const o = r.outstanding;
-                                const lbl = Math.abs(o) < 0.005
-                                  ? <span className="settled">—</span>
-                                  : <span className={o > 0 ? "pos" : "neg"}>{accounting(o)}</span>;
-                                const nd = netDelta.get(r.person_id);
-                                return (
-                                  <tr key={r.person_id}>
-                                    <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
-                                    <td className="num">{r.paid ? money(r.paid) : ""}</td>
-                                    <td className="num">{r.owed ? money(r.owed) : ""}</td>
-                                    <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
-                                    <td className="num">{r.reimbursed ? money(r.reimbursed) : ""}</td>
-                                    <td className="num">{lbl}</td>
-                                    {hasPrev && (
-                                      <td className="num">
-                                        {nd != null && Math.abs(nd) > 0.005 && (
-                                          <span className={nd > 0 ? "pos" : "neg"}>{accounting(nd)}</span>
-                                        )}
-                                      </td>
-                                    )}
-                                    <td>{r.status}</td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                          <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}{hasPrev ? "; ± shows the change vs the prior snapshot" : ""}.</small></p>
-                        </td>
-                      </tr>
-                    );
-                  })()}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Taken</th><th>Label</th><th>By</th><th className="num">Total</th><th className="num">Outstanding</th><th></th></tr>
+            </thead>
+            <tbody>
+              {snapshots.map((s) => {
+                const isOpen = viewing?.id === s.id;
+                return (
+                  <Fragment key={s.id}>
+                    <tr className={isOpen ? "snapshot-open" : ""}>
+                      <td><a href="#" onClick={(e) => { e.preventDefault(); open(s.id); }}>{isOpen ? "▾ " : "▸ "}{fmtTime(s.created_at)}</a></td>
+                      <td>{s.label || <span className="hint">—</span>}</td>
+                      <td>{s.created_by || <span className="hint">—</span>}</td>
+                      <td className="num">{money(s.totalExpenses)}</td>
+                      <td className="num">{money(s.outstanding)}</td>
+                      <td className="num snapshot-actions">
+                        <a href="#" title="Download this snapshot's reimbursement summary as CSV" onClick={(e) => { e.preventDefault(); downloadSummaryCsv(s); }}>⬇ CSV</a>
+                        <button className="btn danger" disabled={snapBusy} onClick={() => remove(s.id)}>Delete</button>
+                      </td>
+                    </tr>
+                    {isOpen && viewing && (() => {
+                      // Per-person net movement vs the previous snapshot, for the ± column.
+                      const netDelta = new Map<number, number>();
+                      for (const dr of viewingDiff?.diff?.paysheet.rows ?? []) {
+                        const o = dr.changes.find((c) => c.field === "outstanding");
+                        if (o && typeof o.from === "number" && typeof o.to === "number") netDelta.set(dr.person_id, round2(o.to - o.from));
+                      }
+                      const hasPrev = !!viewingDiff?.hasPrev;
+                      return (
+                        <tr className="snapshot-detail">
+                          <td colSpan={6}>
+                            <h4 style={{ margin: "0 0 6px" }}>Changes captured in this snapshot</h4>
+                            {!hasPrev ? (
+                              <p className="hint">First snapshot — this is the baseline; there's nothing earlier to compare against.</p>
+                            ) : viewingDiff?.diff?.hasChanges ? (
+                              <DiffList diff={viewingDiff.diff} nameOf={nameFromBundle(viewing.bundle)} netOf={netFromBundle(viewing.bundle)} mode="inputs" />
+                            ) : (
+                              <p className="hint">No changes from the previous snapshot.</p>
+                            )}
+                            <h4 style={{ margin: "10px 0 6px" }}>Reimbursement summary</h4>
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Adult</th><th className="num">Paid</th><th className="num">Owes (share)</th>
+                                  <th className="num">Pre-reimbursed</th><th className="num">Reimbursed</th><th className="num">Net</th>
+                                  {hasPrev && <th className="num">± vs prev</th>}
+                                  <th>Settlement</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {viewing.bundle.paysheet.rows.filter((r) => r.paid || r.owed || r.prepay || r.reimbursed).map((r) => {
+                                  const o = r.outstanding;
+                                  const lbl = Math.abs(o) < 0.005
+                                    ? <span className="settled">—</span>
+                                    : <span className={o > 0 ? "pos" : "neg"}>{accounting(o)}</span>;
+                                  const nd = netDelta.get(r.person_id);
+                                  return (
+                                    <tr key={r.person_id}>
+                                      <td>{r.name} {r.code && <span className="hint">({r.code})</span>}</td>
+                                      <td className="num">{r.paid ? money(r.paid) : ""}</td>
+                                      <td className="num">{r.owed ? money(r.owed) : ""}</td>
+                                      <td className="num">{r.prepay ? money(r.prepay) : ""}</td>
+                                      <td className="num">{r.reimbursed ? money(r.reimbursed) : ""}</td>
+                                      <td className="num">{lbl}</td>
+                                      {hasPrev && (
+                                        <td className="num">
+                                          {nd != null && Math.abs(nd) > 0.005 && (
+                                            <span className={nd > 0 ? "pos" : "neg"}>{accounting(nd)}</span>
+                                          )}
+                                        </td>
+                                      )}
+                                      <td>{r.status}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                            <p><small className="hint">Read-only — frozen state as of {fmtTime(viewing.created_at)}{hasPrev ? "; ± shows the change vs the prior snapshot" : ""}.</small></p>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -3334,29 +3362,31 @@ function SlackReceipts({ bundle, roster, run, busy }: TabProps) {
       )}
 
       {showDecided && decided.length > 0 && (
-        <table style={{ marginTop: 16 }}>
-          <thead>
-            <tr><th>Tagged by</th><th>What</th><th className="num">Amount</th><th>Outcome</th><th>Reviewed</th></tr>
-          </thead>
-          <tbody>
-            {decided.map((r) => (
-              <tr key={r.id} className="zero">
-                <td>{r.slack_user_name}</td>
-                <td>
-                  {r.slack_permalink
-                    ? <a href={r.slack_permalink} target="_blank" rel="noreferrer">{r.description} ↗</a>
-                    : r.description}
-                </td>
-                <td className="num">{money(r.amount)}</td>
-                <td>
-                  {r.status === "approved" ? "✅ Added" : "🚫 Turned down"}
-                  {r.review_note && <div className="hint">{r.review_note}</div>}
-                </td>
-                <td className="hint">{r.reviewed_at ? fmtTime(r.reviewed_at) : ""}{r.reviewed_by ? ` · ${r.reviewed_by}` : ""}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table style={{ marginTop: 16 }}>
+            <thead>
+              <tr><th>Tagged by</th><th>What</th><th className="num">Amount</th><th>Outcome</th><th>Reviewed</th></tr>
+            </thead>
+            <tbody>
+              {decided.map((r) => (
+                <tr key={r.id} className="zero">
+                  <td>{r.slack_user_name}</td>
+                  <td>
+                    {r.slack_permalink
+                      ? <a href={r.slack_permalink} target="_blank" rel="noreferrer">{r.description} ↗</a>
+                      : r.description}
+                  </td>
+                  <td className="num">{money(r.amount)}</td>
+                  <td>
+                    {r.status === "approved" ? "✅ Added" : "🚫 Turned down"}
+                    {r.review_note && <div className="hint">{r.review_note}</div>}
+                  </td>
+                  <td className="hint">{r.reviewed_at ? fmtTime(r.reviewed_at) : ""}{r.reviewed_by ? ` · ${r.reviewed_by}` : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <p><small className="hint">
@@ -4628,51 +4658,53 @@ function Roster({ bundle, roster, run, busy }: TabProps) {
       </small></p>
 
       {guests.length > 0 && (
-        <table style={{ marginBottom: 18 }}>
-          <thead>
-            <tr><th>Guest</th><th>Type</th><th>Billed to</th><th></th></tr>
-          </thead>
-          <tbody>
-            {guests.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  {p.name} <span className="pill">guest</span>
-                  {p.unit_paid && <> <span className="pill">unit pays</span></>}
-                </td>
-                <td className="hint">{p.type === "scout" ? "youth" : "adult"}</td>
-                <td>
-                  <select
-                    aria-label={`Who is billed for ${p.name}`}
-                    disabled={busy}
-                    value={p.unit_paid ? "unit" : p.type === "adult" ? "self" : p.parent_id ? `id:${p.parent_id}` : ""}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      run(() =>
-                        api.updatePerson(
-                          p.id,
-                          v === "unit"
-                            ? { unit_paid: true }
-                            : v === "self"
-                              ? { unit_paid: false }
-                              : { unit_paid: false, parent_ref: v },
-                        ),
-                      );
-                    }}
-                  >
-                    <option value="unit">The unit (troop pays)</option>
-                    {p.type === "adult"
-                      ? <option value="self">{p.name} (themselves)</option>
-                      : adultPool.map((a) => <option key={a.ref} value={a.ref}>{a.name}</option>)}
-                    {p.type === "scout" && !p.unit_paid && p.parent_id == null && (
-                      <option value="">— no responsible adult —</option>
-                    )}
-                  </select>
-                </td>
-                <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table style={{ marginBottom: 18 }}>
+            <thead>
+              <tr><th>Guest</th><th>Type</th><th>Billed to</th><th></th></tr>
+            </thead>
+            <tbody>
+              {guests.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    {p.name} <span className="pill">guest</span>
+                    {p.unit_paid && <> <span className="pill">unit pays</span></>}
+                  </td>
+                  <td className="hint">{p.type === "scout" ? "youth" : "adult"}</td>
+                  <td>
+                    <select
+                      aria-label={`Who is billed for ${p.name}`}
+                      disabled={busy}
+                      value={p.unit_paid ? "unit" : p.type === "adult" ? "self" : p.parent_id ? `id:${p.parent_id}` : ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        run(() =>
+                          api.updatePerson(
+                            p.id,
+                            v === "unit"
+                              ? { unit_paid: true }
+                              : v === "self"
+                                ? { unit_paid: false }
+                                : { unit_paid: false, parent_ref: v },
+                          ),
+                        );
+                      }}
+                    >
+                      <option value="unit">The unit (troop pays)</option>
+                      {p.type === "adult"
+                        ? <option value="self">{p.name} (themselves)</option>
+                        : adultPool.map((a) => <option key={a.ref} value={a.ref}>{a.name}</option>)}
+                      {p.type === "scout" && !p.unit_paid && p.parent_id == null && (
+                        <option value="">— no responsible adult —</option>
+                      )}
+                    </select>
+                  </td>
+                  <td className="num"><button className="btn danger" disabled={busy} onClick={() => run(() => api.deletePerson(p.id))}>×</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <div className="row" style={{ alignItems: "flex-start" }}>
